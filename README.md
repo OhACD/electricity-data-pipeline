@@ -4,15 +4,15 @@ A learning project building a reproducible electricity-data foundation for futur
 
 ## Current Status
 
-Implemented: hourly API fetching, raw JSON archival, DST-safe normalization, quality reports, offline replay and discrepancy research.
+Implemented: hourly API fetching, raw JSON archival, DST-safe normalization, quality reports, offline replay, discrepancy research and opt-in provenance-preserving PostgreSQL persistence.
 
 ```text
-Hourly API -> raw archive -> optional normalization -> candidate CSVs + quality report
+Hourly API -> raw archive -> normalization -> candidate CSVs + quality report -> optional PostgreSQL persistence
 ```
 
-Missing measurements remain missing. Completed, incomplete and future periods are separated using the original fetch time. Reports retain `training_ready: false`; units, revisions and training eligibility still need validation.
+Missing measurements remain missing. Completed, incomplete and future periods are separated using the original fetch time. Persistence writes completed hourly candidates and audits corrections; reports and database runs retain `training_ready: false`. Provider units, independent accuracy and training eligibility remain unresolved.
 
-**Next:** PostgreSQL persistence with provenance and quality status. **Later:** analytical cleaning, features and models. None of these later stages is implemented yet.
+**Later:** analytical cleaning, features and models. Those stages are not implemented.
 
 ## Quickstart
 
@@ -43,6 +43,18 @@ python -m oslo_energy.pipeline.run_ingestion \
 
 Use the original archive path and timezone-aware fetch timestamp, not replay time. The filename records its UTC fetch time. Replay supports hourly and legacy daily snapshots. Run `python -m oslo_energy.pipeline.run_ingestion --help` for all options and see the [system reference](docs/oslo_energy_data_normalization_cleaning_pipeline.md) for output contracts.
 
+## Optional Persistence
+
+PostgreSQL writes are opt-in. Start the local service, apply the additive migration once, then enable persistence on a normalized live run:
+
+```bash
+docker compose up -d postgres
+python -m oslo_energy.database.migrate
+python -m oslo_energy.pipeline.run_ingestion --normalize --persist
+```
+
+Replay can also use `--persist`; it retains the supplied original `--fetched-at` cutoff. A failed database write returns nonzero but keeps the raw archive and normalized files. Persistence does not certify values for training. See the [persistence design](docs/database-design.md) for timestamp ordering, revisions and database test instructions.
+
 ## Source Choice and Findings
 
 We already used the API; the investigation prompted a switch from **daily API ingestion to hourly API ingestion**, not from CSV to API.
@@ -71,9 +83,9 @@ python -m oslo_energy.pipeline.compare_consumption
 | --- | --- |
 | [System and Pipeline](docs/oslo_energy_data_normalization_cleaning_pipeline.md) | Implemented components, contracts, outputs, replay and failure behavior |
 | [Source Decision and Research](docs/statnett_hourly_source_decision.md) | Findings, visualization, source-selection rationale and open provider questions |
-| [Persistence Design](docs/database-design.md) | Proposed PostgreSQL model, integrity, revisions and implementation checklist |
+| [Persistence Design](docs/database-design.md) | Implemented schema, migration, integrity, revisions and opt-in commands |
 
-Runtime code lives under [src/oslo_energy](src/oslo_energy/); offline tests under [tests](tests/). Keep new system contracts in the system reference, new measurements in the research document and unimplemented storage decisions in the persistence design.
+Runtime code lives under [src/oslo_energy](src/oslo_energy/); tests under [tests](tests/). Keep system contracts in the system reference, new measurements in the research document and storage details in the persistence design.
 
 ## Testing
 
@@ -82,7 +94,7 @@ python -m pytest
 python -m compileall -q src/oslo_energy
 ```
 
-Tests use mocked HTTP, temporary directories and saved examples. Real socket connections are blocked; neither internet access nor PostgreSQL is required.
+The ordinary tests use mocked HTTP, temporary directories and saved examples; real network access and PostgreSQL are not required. Explicit PostgreSQL integration tests are documented in the [persistence design](docs/database-design.md).
 
 ## License and Sources
 

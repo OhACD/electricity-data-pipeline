@@ -12,9 +12,13 @@ Hourly Statnett API -> raw JSON archive -> optional normalization
                                               |
                                               v
                                    CSV files + quality report
+                                              |
+                              explicit --persist only
+                                              v
+                             PostgreSQL runs + current + audit
 ```
 
-Fetch-and-archive is the CLI default. `--normalize` adds normalization after archival; `--replay` normalizes an existing snapshot without a network request. PostgreSQL writes, analytical cleaning, features and models are not implemented.
+Fetch-and-archive is the CLI default. `--normalize` adds normalization after archival; `--replay` normalizes an existing snapshot without a network request. `--persist` is opt-in and requires `--normalize` for live ingestion; replay is normalized automatically. PostgreSQL migration must be applied explicitly. Analytical cleaning, features and models are not implemented.
 
 Hourly API observations are the canonical measurement layer for future datasets and model training. Raw snapshots retain evidence; derived datasets must retain their lineage. This source choice does not independently establish accuracy or training readiness.
 
@@ -28,6 +32,7 @@ Hourly API observations are the canonical measurement layer for future datasets 
 | [StatnettNormalizer](../src/oslo_energy/transformation/statnett_normalizer.py) | Validate structure/values, map periods and split candidates |
 | [normalize_archive](../src/oslo_energy/pipeline/normalization.py) | Replay a snapshot and write candidate files plus a quality report |
 | [run_ingestion](../src/oslo_energy/pipeline/run_ingestion.py) | Parse CLI options, orchestrate the run and return a nonzero status on failure |
+| [StatnettRepository](../src/oslo_energy/database/statnett_repository.py) | Persist completed hourly candidates atomically and audit changed values |
 | [compare_consumption](../src/oslo_energy/pipeline/compare_consumption.py) | Archive research inputs, compare complete local days and generate the chart |
 
 Clients do not clean data or write database rows. Normalization does not impute values or construct model features.
@@ -100,6 +105,12 @@ The report distinguishes raw slots, local dates, observations and legacy padding
 
 Structure violations fail rather than silently inventing an interpretation. Validating these contracts establishes reproducible mapping, not independent measurement accuracy.
 
+## Optional PostgreSQL Persistence
+
+Apply the additive migration with `python -m oslo_energy.database.migrate`. Then run `python -m oslo_energy.pipeline.run_ingestion --normalize --persist`; replay can use `--replay PATH --fetched-at ISO_TIMESTAMP --persist`. The database is not contacted unless `--persist` is supplied. A persistence failure returns nonzero but leaves the raw archive, candidate CSVs and quality report in place.
+
+Only completed hourly rows are written. SQL NULL preserves source missingness, including rows where both metrics are missing. Current values are keyed by UTC period start, so repeated autumn local hours remain distinct. Newer source fetch timestamps may update current values; older snapshots cannot overwrite them, and changed values receive a revision audit. Same-checksum retries are idempotent; ambiguous changed snapshots with equal fetch times fail. Run, revision and current-value writes share one transaction. Persistence never promotes training readiness.
+
 ## Legacy Daily Replay
 
 Saved [daily examples](../data/examples/statnett/) remain supported; new ingestion does not request the legacy daily response.
@@ -114,7 +125,7 @@ Legacy daily identity is `observation_date`. Earlier dates are historical candid
 
 Current quality reporting covers missingness, counts, UTC/date mapping, continuity and candidate eligibility. Research demonstrates API/export disagreement; detailed evidence and the visualization belong in the [research document](statnett_hourly_source_decision.md), not the operational contract.
 
-The next milestone is provenance-preserving PostgreSQL storage, as proposed in the [persistence design](database-design.md). Storing observations is distinct from approving them for model training. Before training, verify units, missing-data treatment, revisions and what would have been available at prediction time. Later cleaning and features must not overwrite raw or canonical source measurements.
+The [persistence design](database-design.md) records schema, migration and correction semantics. Storing observations is distinct from approving them for model training. Before training, verify units, missing-data treatment, revisions and what would have been available at prediction time. Later cleaning and features must not overwrite raw or canonical source measurements.
 
 ## Verification
 
@@ -123,4 +134,4 @@ python -m pytest
 python -m compileall -q src/oslo_energy
 ```
 
-Tests block real socket connections and need no database. They cover HTTP failures, archival, hourly and legacy daily contracts, DST, missing values, fetch-time cutoffs, offline replay, CLI failures and complete-day research comparisons. Live checks and snapshot-specific counts are recorded separately in the research document.
+The ordinary test suite blocks network access and requires no database. Marked persistence integration tests can be enabled with `RUN_POSTGRES_TESTS=1`; they cover idempotency, corrections, NULL transitions and rollback. The CI job runs only the offline suite. Live checks and snapshot-specific counts are recorded separately in the research document.

@@ -50,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     source.add_argument("--replay", type=Path, help="normalize an existing archive without an API request")
     parser.add_argument("--normalize", action="store_true", help="normalize the response after raw archival")
+    parser.add_argument("--persist", action="store_true", help="persist completed hourly candidates to PostgreSQL")
     parser.add_argument("--fetched-at", type=parse_fetched_at, help="original fetch time; required for replay")
     parser.add_argument(
         "--output-dir", type=Path, default=Path("data/normalized/statnett"),
@@ -60,6 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--replay requires --fetched-at to retain the original date cutoff")
     if args.replay is None and args.fetched_at is not None:
         parser.error("--fetched-at is only valid with --replay")
+    if args.persist and args.replay is None and not args.normalize:
+        parser.error("--persist requires --normalize for live ingestion")
 
     try:
         if args.replay is None:
@@ -91,6 +94,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"Saved normalized artifacts to {normalized.output_dir}")
             print("Training readiness blocked: provider units, API/export differences and source finality require validation")
+            if args.persist:
+                from oslo_energy.database.statnett_repository import StatnettRepository
+
+                result = StatnettRepository().persist(
+                    normalized.data,
+                    archive_path=archive_path,
+                    fetched_at=fetched_at,
+                    requested_from_date=args.from_date if args.replay is None else None,
+                )
+                action = "Already persisted" if result.idempotent else "Persisted"
+                print(
+                    f"{action} {result.candidate_count} hourly candidates in database run {result.run_id}; "
+                    f"current rows inserted/updated: {result.inserted_or_updated_count}"
+                )
     except (StatnettClientError, OSError, ValueError) as exc:
         print(f"Ingestion failed: {exc}", file=sys.stderr)
         return 1

@@ -21,5 +21,9 @@ research = ["matplotlib"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+oslo_energy = ["database/migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["postgres: requires the explicitly enabled PostgreSQL integration database"]

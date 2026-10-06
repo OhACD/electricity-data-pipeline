@@ -4,7 +4,10 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def block_network(monkeypatch):
+def block_network(monkeypatch, request):
+    if request.node.get_closest_marker("postgres"):
+        return
+
     def blocked(*args, **kwargs):
         raise AssertionError("Tests must not connect to live APIs or databases")
 

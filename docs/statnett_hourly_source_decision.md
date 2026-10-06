@@ -145,7 +145,40 @@ Ask the documented provider contact, `trr@statnett.no`, to clarify:
 2. What changed in consumption processing around July 9, 2025, 04:00-06:00 UTC.
 3. Units, aggregation windows, revision policy and the intended relationship between hourly `GetData` and annual exports.
 
-No independent ground truth has been established. Hourly ingestion improves traceability and completeness checks; it does not close these questions or authorize training. The next [persistence design](database-design.md) separates provenance-preserving candidate storage from training approval; storing a value must not certify its accuracy.
+No independent ground truth has been established. Hourly ingestion improves traceability and completeness checks; it does not close these questions or authorize training. The [persistence design](database-design.md) separates provenance-preserving candidate storage from training approval; storing a value must not certify its accuracy.
+
+### Bounded Storage Validation Gate
+
+Executed against the retained archives on October 6, 2026, the bounded gate
+confirmed 190,753 completed hourly slots with unique, contiguous UTC identities.
+Three annual requests overlap that snapshot on 8,784 (2024), 8,760 (2025), and
+6,673 (2026) hours; production, consumption and nulls match exactly in each
+overlap. The spring and autumn DST checks yielded 23 and 25 hours respectively;
+the March 18/April 10 production boundaries and July 9 consumption transition
+each retained complete 24-hour local dates. November 17, 2025 has two nulls per
+series, while November 18 has 24; these remain missing, not imputed. The strict
+daily comparison remains 999 complete dates. Focused normalization and comparison
+tests passed (59 tests). This confirms internal structural consistency only, not
+independent accuracy or finality.
+
+The published translations describe export values as "MW per hour" and Norway
+overview production/consumption as ENTSO-E sourced. Neither statement resolves
+the precise `GetData` units, revision policy or export discrepancy. ENTSO-E is
+therefore not an independent benchmark without further lineage evidence; no
+independent comparison tolerance or prediction target has been agreed.
+
+Provider follow-up is pending: the questions above are a draft, not a sent email
+or a written reply. Also ask whether values are hourly mean power or integrated
+energy, which sources feed each endpoint, when estimates become final, and which
+publication/revision timestamps are available. Do not wait for a reply to store
+structurally valid candidates, but keep `training_ready=false`.
+
+Repeated ingestion of a fixed historical range with opt-in persistence can
+capture future system vintages using immutable archives, fetch times and
+change-only database audits. This is a manual workflow, not an installed schedule
+or a reconstruction of past publication times. Database recording time and
+system fetch time remain distinct; neither is an asserted provider publication
+time.
 
 ## Reproduction
 
