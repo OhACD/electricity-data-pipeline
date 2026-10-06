@@ -8,28 +8,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_DB: oslo_energy
-          POSTGRES_USER: oslo_energy
-          POSTGRES_PASSWORD: oslo_energy_dev
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U oslo_energy -d oslo_energy"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: oslo_energy
-      POSTGRES_USER: oslo_energy
-      POSTGRES_PASSWORD: oslo_energy_dev
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -40,12 +18,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: python -m pip install -e .
-
-      - name: Apply database migrations
-        run: psql "$DATABASE_URL" -f src/oslo_energy/database/migrations/001_create_electricity_observations.sql
-        env:
-          DATABASE_URL: postgresql://oslo_energy:oslo_energy_dev@localhost:5432/oslo_energy
+        run: python -m pip install -e '.[dev]'
 
       - name: Run tests
-        run: pytest
+        run: python -m pytest

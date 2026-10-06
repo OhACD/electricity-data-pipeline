@@ -1,0 +1,153 @@
+import subprocess
+import sys
+from datetime import date, datetime, timezone
+
+import httpx
+import pytest
+
+from oslo_energy.ingestion.archive import Archive
+from oslo_energy.ingestion.statnett_client import StatnettClient, StatnettClientError
+from oslo_energy.pipeline import run_ingestion
+from oslo_energy.pipeline.ingestion import StatnettIngestion
+
+
+def make_client(payload):
+    return StatnettClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    )
+
+
+def test_ingestion_archives_raw_response(tmp_path):
+    payload = {"Production": [None, 12.5], "Consumption": [10.0, None], "metadata": "raw"}
+
+    result = StatnettIngestion(make_client(payload), tmp_path).run(date(2005, 1, 1))
+
+    assert result.from_date == date(2005, 1, 1)
+    assert result.fetched_at.tzinfo == timezone.utc
+    assert result.archive_path.parent == tmp_path
+    assert result.archive_path.name.startswith("statnett_from_2005-01-01_")
+    assert Archive(result.archive_path).read() == payload
+
+
+def test_repeated_ingestion_creates_distinct_archives(tmp_path, monkeypatch):
+    class FixedClock:
+        @staticmethod
+        def now(zone):
+            return datetime(2026, 1, 1, tzinfo=zone)
+
+    monkeypatch.setattr("oslo_energy.pipeline.ingestion.datetime", FixedClock)
+    ingestion = StatnettIngestion(make_client({"raw": True}), tmp_path)
+
+    first = ingestion.run(date(2005, 1, 1))
+    second = ingestion.run(date(2005, 1, 1))
+
+    assert first.archive_path != second.archive_path
+    assert Archive(first.archive_path).read() == {"raw": True}
+    assert Archive(second.archive_path).read() == {"raw": True}
+
+
+def test_fetch_failure_does_not_create_archive(tmp_path):
+    client = StatnettClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(500))
+    )
+
+    with pytest.raises(StatnettClientError):
+        StatnettIngestion(client, tmp_path / "raw").run(date(2005, 1, 1))
+
+    assert not (tmp_path / "raw").exists()
+
+
+def test_archive_failure_propagates(tmp_path):
+    path = tmp_path / "not-a-directory"
+    path.write_text("existing file", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        StatnettIngestion(make_client({}), path).run(date(2005, 1, 1))
+
+
+@pytest.mark.parametrize("start_date", [None, "2025-01-01"])
+def test_cli_defaults_and_explicit_start_date(tmp_path, monkeypatch, capsys, start_date):
+    requested_dates = []
+
+    def respond(request):
+        requested_dates.append(request.url.params["From"])
+        return httpx.Response(200, json={"raw": True})
+
+    monkeypatch.setattr(
+        run_ingestion,
+        "StatnettClient",
+        lambda: StatnettClient(transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.chdir(tmp_path)
+    args = [] if start_date is None else ["--from-date", start_date]
+
+    assert run_ingestion.main(args) == 0
+
+    expected_date = start_date or "2005-01-01"
+    assert requested_dates == [expected_date]
+    assert len(list((tmp_path / "data/raw/statnett").glob("*.json"))) == 1
+    output = capsys.readouterr()
+    assert expected_date in output.out
+    assert "Archived raw response" in output.out
+    assert not output.err
+
+
+def test_cli_custom_archive_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_ingestion, "StatnettClient", lambda: make_client({}))
+    archive_dir = tmp_path / "custom"
+
+    assert run_ingestion.main(["--archive-dir", str(archive_dir)]) == 0
+    assert len(list(archive_dir.glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize("value", ["bad", "2025-02-30", "20250101", "2025-1-1"])
+def test_cli_invalid_date_fails_before_request(monkeypatch, value):
+    def unexpected_client():
+        pytest.fail("Invalid dates must fail before creating the client")
+
+    monkeypatch.setattr(run_ingestion, "StatnettClient", unexpected_client)
+
+    with pytest.raises(SystemExit) as exc:
+        run_ingestion.main(["--from-date", value])
+
+    assert exc.value.code == 2
+
+
+def test_cli_api_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        run_ingestion,
+        "StatnettClient",
+        lambda: StatnettClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(500))
+        ),
+    )
+
+    assert run_ingestion.main(["--archive-dir", str(tmp_path)]) == 1
+    output = capsys.readouterr()
+    assert "Ingestion failed" in output.err
+    assert not output.out
+    assert not list(tmp_path.iterdir())
+
+
+def test_cli_archive_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(run_ingestion, "StatnettClient", lambda: make_client({}))
+    path = tmp_path / "not-a-directory"
+    path.write_text("existing file", encoding="utf-8")
+
+    assert run_ingestion.main(["--archive-dir", str(path)]) == 1
+    assert "Ingestion failed" in capsys.readouterr().err
+
+
+def test_raw_cli_does_not_import_database():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import oslo_energy.pipeline.run_ingestion; "
+            "assert not any(name.startswith('oslo_energy.database') for name in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr

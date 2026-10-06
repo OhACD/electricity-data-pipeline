@@ -1,253 +1,170 @@
 # Oslo Energy
 
-An intentionally hands-on electricity data pipeline for AI research and learning. The project is built manually, from first principles, to make the data flow, persistence, and future machine-learning work easy to understand.
+A hands-on electricity data pipeline for learning and future consumption forecasting. Statnett is the primary data source. The pipeline archives production/consumption responses and can normalize the daily series into Norwegian calendar-date candidates with a quality report.
 
-It currently collects monthly electricity consumption data for the NO1 electricity price area in Norway. The project is still under active development, and its architecture and scope will grow as new concepts are explored.
+The project name comes from its original Oslo-focused goal. Statnett's documented production/consumption coverage is Norway-wide, not municipality-level or NO1-specific. Daily values currently retain provider units because the daily API totals have not been reconciled with the official hourly export.
 
-The project is named Oslo Energy because the original goal was to study electricity consumption around Oslo. The current SSB dataset is organized by electricity price area rather than municipality, so the implementation currently targets NO1, which covers south-eastern Norway.
+## Current Scope
 
-## License
+```text
+Statnett API -> StatnettClient -> StatnettIngestion -> Raw JSON archive
+              |
+              v  (opt-in or replay)
+            StatnettNormalizer
+              |
+              v
+            Daily candidates + quality report
+```
 
-The Oslo Energy source code and original documentation are licensed under the [MIT License](LICENSE).
+Implemented:
 
-The project retrieves data from Statistics Norway (SSB). The MIT License does not apply to SSB's source data, API, or any third-party material. Refer to the [SSB PxWeb API](https://data.ssb.no/api/pxwebapi/v2) and [SSB table 14092](https://www.ssb.no/en/statbank/table/14092) for the applicable source terms.
+- HTTP requests with timeouts and explicit request/response errors.
+- A command-line start date and archive directory.
+- Raw decoded JSON preservation, including provider metadata and missing values.
+- Unique archive filenames and refusal to overwrite an existing file.
+- Calendar-aware daily normalization, preserving genuine missing measurements.
+- Verified autumn null-padding handling and 23/24/25-hour UTC period boundaries.
+- Separate completed-day candidates, incomplete current-day values, and future quarantine.
+- Reproducible archive replay with original fetch-time provenance.
+- Offline client, archive, normalizer, orchestration, and CLI tests.
+
+PostgreSQL persistence, analytical cleaning, feature engineering, and machine learning are not implemented yet. Outputs are not training-ready: the quality report records `training_ready: false` until daily aggregation/units and source finality are independently verified. A completed date alone does not prove a measurement was final or available at a historical prediction time.
 
 ## Quickstart
 
-The easiest way to run Oslo Energy locally is to use Docker Compose for PostgreSQL and Python on the host machine.
-
-Start PostgreSQL:
-
-```bash
-docker compose up -d
-```
-
-Create and activate a virtual environment, then install the project:
+Use Python 3.10 or newer and run these commands from the repository root:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e '.[dev]'
+python -m pytest
 ```
 
-Apply the database migration:
-
-```bash
-docker compose exec -T postgres psql \
-  -U oslo_energy \
-  -d oslo_energy \
-  < src/oslo_energy/database/migrations/001_create_electricity_observations.sql
-```
-
-Run the tests:
-
-```bash
-pytest
-```
-
-Run the ingestion pipeline:
+Fetch and archive the response with a requested start date of 2005-01-01:
 
 ```bash
 python -m oslo_energy.pipeline.run_ingestion
 ```
 
-The pipeline fetches the available monthly observations from SSB and stores them in PostgreSQL.
-
-## Features
-
-Oslo Energy currently provides:
-
-1. An SSB PxWeb API client with timeout and HTTP error handling.
-2. Ingestion of total electricity consumption for the NO1 price area.
-3. Conversion of SSB JSON-stat2 responses into typed domain objects.
-4. PostgreSQL persistence through a repository abstraction.
-5. Idempotent writes protected by a database uniqueness constraint.
-6. Transactional batch persistence with rollback on failure.
-7. Unit and PostgreSQL integration tests for the core data flow.
-8. A Docker Compose development database.
-
-## How it works
-
-The current data flow is:
-
-```text
-SSB PxWeb API
-     |
-     v
-SSBClient
-     |
-     v
-ElectricityIngestion
-     |
-     v
-normalize()
-     |
-     v
-ElectricityObservation
-     |
-     v
-ElectricityRepository
-     |
-     v
-PostgreSQL
-```
-
-The executable pipeline creates the SSB client, database connection, repository, and ingestion service. It then requests SSB table `14092`, normalizes the response, saves the observations, and closes the database connection.
-
-The ingestion query selects:
-
-- Consumer group: `0` (total)
-- Price area: `NO1`
-- Measure: `ForbrukTotal` (consumption)
-- Time: all available months
-
-The source currently provides monthly observations. A value such as `2026M08` is represented internally as `date(2026, 8, 1)`, using the first day of the month as the period convention.
-
-## SSB Client
-
-`SSBClient` owns communication with the Statistics Norway API. It handles HTTP requests, response decoding, timeouts, and HTTP failures. API failures are exposed as `SSBClientError` rather than leaking HTTP library details into the rest of the application.
-
-The client does not decide which dataset or price area the application wants. Dataset selection belongs to the ingestion layer.
-
-## Transformation
-
-The normalization layer converts the external JSON-stat2 response into immutable `ElectricityObservation` values:
-
-```python
-ElectricityObservation(
-    period=date(2026, 8, 1),
-    price_area="NO1",
-    consumer_group="0",
-    consumption_mwh=1959910,
-)
-```
-
-The source codes are preserved as identifiers. Human-readable labels can be added later through metadata or lookup tables.
-
-## Database
-
-PostgreSQL stores observations in the `electricity_observations` table:
-
-| Column | Purpose |
-| --- | --- |
-| `id` | Internal identity key |
-| `period` | First day of the observation month |
-| `price_area_code` | SSB price-area code |
-| `consumer_group_code` | SSB consumer-group code |
-| `consumption_mwh` | Consumption in megawatt-hours |
-| `ingested_at` | Time the record was persisted |
-
-The table requires all observation fields, rejects negative consumption, and enforces uniqueness across:
-
-```text
-period + price_area_code + consumer_group_code
-```
-
-## Reliability Guarantees
-
-## Idempotent ingestion
-
-The repository uses `ON CONFLICT DO NOTHING` for the observation uniqueness key. Running the same ingestion twice does not create duplicate rows.
-
-## Transactional persistence
-
-Observations are saved as one batch. A successful batch is committed. If an insert fails, the repository rolls the transaction back so a partially written batch is not left in the database.
-
-These guarantees are enforced at the persistence boundary and are not dependent only on application-level checks.
-
-## Testing
-
-The test suite is organized around architectural boundaries:
-
-- Normalization tests use deterministic JSON-stat2 fixtures and require no network or database.
-- Repository tests use PostgreSQL to verify persistence and idempotency.
-- Rollback tests verify that a failed batch leaves no partial data behind.
-
-The database tests expect the local PostgreSQL service to be running and the migration to have been applied.
-
-## Database Inspection
-
-Connect to the development database with:
+Choose a different start date or archive directory:
 
 ```bash
-docker compose exec postgres psql -U oslo_energy -d oslo_energy
+python -m oslo_energy.pipeline.run_ingestion \
+  --from-date 2025-01-01 \
+  --archive-dir data/raw/statnett
 ```
 
-Count stored observations:
+Inspect available options:
 
-```sql
-SELECT COUNT(*)
-FROM electricity_observations;
+```bash
+python -m oslo_energy.pipeline.run_ingestion --help
 ```
 
-Inspect the monthly series:
+Fetch, archive, and normalize a daily series:
 
-```sql
-SELECT
-    period,
-    price_area_code,
-    consumer_group_code,
-    consumption_mwh
-FROM electricity_observations
-ORDER BY period;
+```bash
+python -m oslo_energy.pipeline.run_ingestion --from-date 2005-01-01 --normalize
 ```
+
+Replay an existing archive without a network request:
+
+```bash
+python -m oslo_energy.pipeline.run_ingestion \
+  --replay path/to/raw.json \
+  --fetched-at 2026-10-06T00:56:03.832107Z \
+  --output-dir data/normalized/statnett
+```
+
+Replace the example path and fetch timestamp with those of the original download. Replay requires a timezone-aware original fetch time, not the time of replay; otherwise current-day exclusion would change. The source archive filename contains its UTC fetch time. Normalization supports only responses with `PeriodTickMs = 86400000`; shorter requests may return hourly data and must not be interpreted as daily observations.
+
+The start date must use `YYYY-MM-DD`. Relative archive paths are resolved from the working directory. A fetch/decode/archive failure returns a nonzero exit status; a successful run prints the requested date and archive path.
+
+The client calls `GET https://driftsdata.statnett.no/restapi/ProductionConsumption/GetData` with the `From` query parameter. Requesting 2005 does not prove complete historical coverage: the returned metadata and arrays must be checked in the normalization phase. No end-date parameter is exposed.
+
+No Docker service or database is needed for this milestone.
+
+## Raw Archives
+
+New responses are written to ignored `data/raw/statnett/` by default. Filenames include the requested start date, UTC fetch time, and a unique identifier. Repeated runs create separate snapshots rather than replacing earlier responses.
+
+Archives contain the decoded provider JSON, without added envelopes, filtering, interpolation, or timestamp changes. They are not byte-for-byte copies of the original HTTP response: whitespace and JSON formatting are regenerated. A response containing invalid JSON or a non-object top-level value fails before archival. Invalid non-finite numeric values cannot be written as JSON.
+
+The existing responses are retained under [data/examples/statnett/](data/examples/statnett/) for inspection and future replay. They are examples, not proof of data completeness or a verified forecast boundary. Their interval metadata currently indicates 86,400,000 milliseconds (daily).
+
+A live audit on 2026-10-06 found 7,970 raw slots per array covering 7,949 Norwegian dates, with 21 null padding slots immediately after autumn DST days. These are historical padding, not evidence of 21 forecast days. Normalization retains the remaining 10 missing values per series, separates 7,948 completed-day candidates from one incomplete date, and does not invent future dates. All three saved provider examples reconcile against the same rule. Raw checksums are unchanged after replay.
+
+Use `Archive(path).read()` from the archive module to load a snapshot. Missing or malformed files raise errors rather than returning an empty dataset.
+
+## Normalized Candidates
+
+Each normalization creates a unique run directory under ignored `data/normalized/statnett/`:
+
+- `historical_candidates.csv`: dates strictly before the original fetch date in Norway.
+- `incomplete.csv`: values for the fetch date, never included in historical candidates.
+- `future_quarantine.csv`: dates after the fetch date, never included in historical candidates. They are not automatically proven provider forecasts.
+- `quality.json`: source archive, original UTC fetch time, slot/date/padding counts, missingness, date continuity, quarantine counts, and unresolved reference-validation status. This file is written last; a failed run may leave partial CSVs and must not be treated as a completed output.
+
+Rows contain `observation_date`, timezone-aware `period_start_utc` and `period_end_utc`, `period_hours`, `source_index`, `production`, and `consumption`. Daily identity is the Norwegian calendar date, not a UTC date obtained by dropping the timezone. Only explicitly validated null padding is removed; genuine nulls remain missing. Unexpected source counts, non-null padding, negative/non-finite measurements, and non-midnight metadata fail normalization.
+
+The October 2025 daily API values do not match sums of the official hourly CSV, even after simple timestamp-shift and rounding checks. No conversion factor or relabeling as MWh is applied to conceal this discrepancy. Resolve it with provider documentation or reference data before model training or database persistence.
 
 ## Project Structure
 
 ```text
-ml-prediction-pipeline/
-|
-+- src/oslo_energy/
-|  +- ingestion/       SSB API communication
-|  +- transformation/  JSON-stat2 normalization and domain model
-|  +- database/        PostgreSQL connection, repository, and migration
-|  +- pipeline/        Ingestion orchestration and executable entry point
-|
-+- tests/
-|  +- database/        PostgreSQL repository and rollback tests
-|
-+- docker-compose.yml  Local PostgreSQL service
-+- pyproject.toml      Python package and dependency configuration
+src/oslo_energy/
+  ingestion/
+    statnett_client.py    HTTP communication only
+    archive.py            JSON archival and replay
+  pipeline/
+    ingestion.py          Fetch-then-archive orchestration
+    normalization.py      Archive replay and candidate exports
+    run_ingestion.py      Command-line entry point
+  transformation/
+    statnett_normalizer.py Daily calendar mapping and quality metrics
+  database/
+    connection.py         PostgreSQL configuration for a later phase
+data/examples/statnett/   Existing provider response examples
+data/raw/statnett/        Runtime archives (ignored)
+data/normalized/statnett/ Runtime candidates and reports (ignored)
+tests/ingestion/           Mocked HTTP and archive tests
+tests/pipeline/            Ingestion, replay, and CLI tests
+tests/transformation/      Calendar contract and saved-response tests
+docs/                     Current boundaries and future design
+docker-compose.yml        Optional development PostgreSQL
 ```
 
-## Current Limitations
+Provider abstractions, cloud infrastructure, dashboards, and empty ML modules are deliberately deferred until there is working behavior to put in them.
 
-1. The source data is monthly rather than hourly or daily.
-2. Only the NO1 electricity price area is currently ingested.
-3. Only the total consumer group and consumption measure are selected.
-4. There is no forecasting model or prediction API yet.
-5. There is no dashboard or automated cloud schedule yet.
-6. Raw SSB responses are not archived.
-7. There is no ingestion-run metadata or structured observability yet.
-8. The normalizer supports the known application query shape rather than arbitrary JSON-stat2 datasets.
-9. Database migrations are plain SQL files rather than a full migration framework.
-10. Development credentials are local defaults and must not be used in production.
+## Testing
 
-The current dataset is intentionally small. Its seasonal pattern makes it useful for proving the pipeline, but it also means future machine-learning work will need simple baselines and careful validation to avoid overfitting.
+```bash
+python -m pytest
+python -m compileall -q src/oslo_energy
+```
 
-## Future Improvements
+Tests use `httpx.MockTransport`, temporary directories, and the retained provider examples. An automatic fixture blocks real socket connections. The suite requires neither internet access nor PostgreSQL, and checks source validation, spring/autumn DST, padding, genuine missing values, current/future exclusion, archive preservation, replay provenance, and CLI failures.
 
-1. Add baseline forecasting models, including previous-month and seasonal-naive predictions.
-2. Build feature extraction for lags, rolling statistics, and calendar seasonality.
-3. Add forecast storage and model versioning.
-4. Add ingestion-run tracking, structured logs, and freshness monitoring.
-5. Schedule ingestion in a managed cloud environment.
-6. Add an API or dashboard for observations and forecasts.
-7. Expand the dataset and support additional price areas when needed.
+## PostgreSQL and Next Steps
 
-## Engineering Decisions
+PostgreSQL remains the planned store for normalized historical observations. Pandas will handle normalization and later analysis; psycopg will connect the application to tables we define in PostgreSQL. JSON archives preserve source responses independently of that schema.
 
-- External systems are kept at the edges of the application.
-- The SSB client knows how to communicate with SSB; ingestion knows what data to request.
-- JSON-stat2 is converted at the normalization boundary so the rest of the application uses domain objects.
-- SQL and transaction handling remain inside the repository.
-- Database constraints provide a durable guarantee for idempotency and valid values.
-- PostgreSQL is used instead of a data lake because the current dataset is small and benefits from relational constraints and simple local development.
-- Additional infrastructure is deferred until the local ingestion pipeline is reliable.
+The old SSB implementation and monthly schema have been retired. Cleanup does not modify an existing database or delete its Docker volume. There is no active observation migration or repository in this milestone. Docker Compose and the connection helper remain available for future persistence work; development credentials must not be used in production.
 
-## References
+The next phase should:
 
-1. [Statistics Norway PxWeb API](https://data.ssb.no/api/pxwebapi/v2)
-2. [SSB table 14092](https://www.ssb.no/en/statbank/table/14092)
-3. [PostgreSQL documentation](https://www.postgresql.org/docs/)
-4. [Docker Compose documentation](https://docs.docker.com/compose/)
+1. Resolve the daily API versus hourly-export discrepancy and verify measurement units/aggregation windows.
+2. Verify source finality and revision/provenance rules before declaring candidates training-ready.
+3. Add a PostgreSQL daily-date schema and transactional, idempotent ingestion with explicit correction handling.
+4. Build analytical quality analysis, feature engineering, and time-series model evaluation later, without implicit imputation.
+
+See [Database Design](docs/database-design.md) and [Normalization and Cleaning Design](docs/oslo_energy_data_normalization_cleaning_pipeline.md).
+
+## License and Sources
+
+Project source code and original documentation are covered by the [MIT License](LICENSE). That license does not apply to Statnett data, its API, or third-party material, including the archived examples. Confirm applicable provider terms before redistribution or production use.
+
+- [Statnett operational data](https://driftsdata.statnett.no/)
+- [Statnett timestamped downloads and source definitions](https://driftsdata.statnett.no/Web/Download/)
+- [PostgreSQL documentation](https://www.postgresql.org/docs/)
+- [Docker Compose documentation](https://docs.docker.com/compose/)
