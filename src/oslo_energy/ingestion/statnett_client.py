@@ -1,6 +1,8 @@
 """HTTP client for Statnett production and consumption data."""
 
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -20,12 +22,31 @@ class StatnettClient:
         self.timeout = timeout
         self.transport = transport
 
-    def get_production_consumption(self, from_date: str) -> dict[str, Any]:
+    def get_production_consumption(
+        self, from_date: str, *, to_date: str | None = None
+    ) -> dict[str, Any]:
         url = f"{self.base_url}/ProductionConsumption/GetData"
+        local_timezone = ZoneInfo("Europe/Oslo")
+        start_date = date.fromisoformat(from_date)
+        start = datetime.combine(start_date, time(), local_timezone)
+        end = datetime.now(timezone.utc)
+        if to_date is not None:
+            end_date = date.fromisoformat(to_date)
+            if end_date < start_date:
+                raise ValueError("to_date must not precede from_date")
+            boundary = datetime.combine(end_date + timedelta(days=1), time(), local_timezone)
+            end = min(end, boundary - timedelta(milliseconds=1))
+        if start > end:
+            raise ValueError("from_date must not be in the future")
+        params = {
+            "FromInTicks": int(start.timestamp() * 1000),
+            "ToInTicks": int(end.timestamp() * 1000),
+            "Frequency": "Hours",
+        }
 
         try:
             with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
-                response = client.get(url, params={"From": from_date})
+                response = client.get(url, params=params)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise StatnettClientError(f"Statnett request failed: {exc}") from exc

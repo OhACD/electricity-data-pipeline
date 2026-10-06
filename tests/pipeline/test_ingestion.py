@@ -70,7 +70,10 @@ def test_cli_defaults_and_explicit_start_date(tmp_path, monkeypatch, capsys, sta
     requested_dates = []
 
     def respond(request):
-        requested_dates.append(request.url.params["From"])
+        requested_dates.append(
+            datetime.fromtimestamp(int(request.url.params["FromInTicks"]) / 1000, timezone.utc)
+        )
+        assert request.url.params["Frequency"] == "Hours"
         return httpx.Response(200, json={"raw": True})
 
     monkeypatch.setattr(
@@ -84,7 +87,9 @@ def test_cli_defaults_and_explicit_start_date(tmp_path, monkeypatch, capsys, sta
     assert run_ingestion.main(args) == 0
 
     expected_date = start_date or "2005-01-01"
-    assert requested_dates == [expected_date]
+    from zoneinfo import ZoneInfo
+
+    assert [value.astimezone(ZoneInfo("Europe/Oslo")).date().isoformat() for value in requested_dates] == [expected_date]
     assert len(list((tmp_path / "data/raw/statnett").glob("*.json"))) == 1
     output = capsys.readouterr()
     assert expected_date in output.out

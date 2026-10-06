@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+research = ["matplotlib"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

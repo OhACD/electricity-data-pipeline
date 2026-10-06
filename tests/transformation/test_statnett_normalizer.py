@@ -126,7 +126,7 @@ def test_missing_measurement_on_autumn_day_is_not_padding():
     assert result.quality.consumption_missing_count == 1
 
 
-@pytest.mark.parametrize("period", [0, -1, 3600000, True, "86400000", None])
+@pytest.mark.parametrize("period", [0, -1, 900000, True, "86400000", None])
 def test_unsupported_period_is_rejected(period):
     source = payload("2025-01-01", "2025-01-01", [1], [2])
     source["PeriodTickMs"] = period
@@ -233,3 +233,84 @@ def test_existing_provider_examples_reconcile_without_changing_values(filename):
     for index, value in zip(result.observations["source_index"], result.observations["consumption"]):
         expected = source["Consumption"][index]
         assert pd.isna(value) if expected is None else value == expected
+
+
+def hourly_payload(start, count):
+    starts = pd.date_range(start=pd.Timestamp(start), periods=count, freq="h")
+    return {
+        "StartPointUTC": int(starts[0].timestamp() * 1000),
+        "EndPointUTC": int(starts[-1].timestamp() * 1000),
+        "PeriodTickMs": 3600000,
+        "Production": list(range(count)),
+        "Consumption": list(range(count)),
+    }
+
+
+@pytest.mark.parametrize(
+    "start,count,local_date", [("2025-03-29T23:00:00Z", 23, "2025-03-30"),
+                              ("2025-10-25T22:00:00Z", 25, "2025-10-26")],
+)
+def test_hourly_dst_days_have_unique_utc_periods(start, count, local_date):
+    source = hourly_payload(start, count)
+    original = deepcopy(source)
+    result = StatnettNormalizer().normalize(
+        source, fetched_at=datetime(2025, 10, 28, tzinfo=timezone.utc)
+    )
+    assert source == original
+    assert len(result.observations) == count
+    assert result.observations["observation_date"].astype(str).unique().tolist() == [local_date]
+    assert result.observations["period_start_utc"].is_unique
+    assert result.observations["period_hours"].tolist() == [1] * count
+    assert result.quality.frequency == "hourly"
+    assert result.quality.period_tick_ms == 3600000
+    assert result.quality.expected_date_count == 1
+    assert result.quality.padding_count == result.quality.duplicate_count == 0
+    assert result.quality.temporal_gap_count == 0
+    assert result.quality.training_ready is False
+    if count == 25:
+        local_hours = result.observations["period_start_utc"].dt.tz_convert("Europe/Oslo").dt.hour
+        assert (local_hours == 2).sum() == 2
+
+
+def test_hourly_missing_values_and_fetch_cutoff():
+    source = hourly_payload("2025-01-01T00:00:00Z", 3)
+    source["Consumption"][0] = None
+    result = StatnettNormalizer().normalize(
+        source, fetched_at=datetime(2025, 1, 1, 1, 30, tzinfo=timezone.utc)
+    )
+    assert result.historical["source_index"].tolist() == [0]
+    assert result.incomplete["source_index"].tolist() == [1]
+    assert result.forecast["source_index"].tolist() == [2]
+    assert pd.isna(result.historical["consumption"].iloc[0])
+    assert result.quality.consumption_missing_count == 1
+    assert result.quality.consumption_missing_rate == pytest.approx(1 / 3)
+
+
+def test_hourly_period_ending_at_fetch_time_is_completed():
+    result = StatnettNormalizer().normalize(
+        hourly_payload("2025-01-01T00:00:00Z", 2),
+        fetched_at=datetime(2025, 1, 1, 1, tzinfo=timezone.utc),
+    )
+    assert result.historical["source_index"].tolist() == [0]
+    assert result.incomplete["source_index"].tolist() == [1]
+    assert result.quality.forecast_count == 0
+
+
+@pytest.mark.parametrize("field", ["StartPointUTC", "EndPointUTC"])
+def test_hourly_unaligned_endpoint_is_rejected(field):
+    source = hourly_payload("2025-01-01T00:00:00Z", 3)
+    source[field] += 60000
+    with pytest.raises(ValueError, match="hour boundaries"):
+        StatnettNormalizer().normalize(
+            source, fetched_at=datetime(2025, 1, 2, tzinfo=timezone.utc)
+        )
+
+
+def test_hourly_slot_count_must_match_metadata():
+    source = hourly_payload("2025-01-01T00:00:00Z", 3)
+    source["Production"].pop()
+    source["Consumption"].pop()
+    with pytest.raises(ValueError, match="Hourly calendar contract"):
+        StatnettNormalizer().normalize(
+            source, fetched_at=datetime(2025, 1, 2, tzinfo=timezone.utc)
+        )

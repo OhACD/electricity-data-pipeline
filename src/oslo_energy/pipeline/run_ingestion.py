@@ -1,4 +1,4 @@
-"""Command-line entry point for raw ingestion and calendar-aware archive replay."""
+"""Command-line entry point for hourly ingestion and interval-aware archive replay."""
 
 import argparse
 import sys
@@ -66,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = StatnettIngestion(StatnettClient(), args.archive_dir).run(args.from_date)
             archive_path = result.archive_path
             fetched_at = result.fetched_at
-            print(f"Requested Statnett data from {result.from_date.isoformat()}")
+            print(f"Requested hourly Statnett API data from {result.from_date.isoformat()}")
             print(f"Archived raw response to {archive_path}")
         else:
             archive_path = args.replay
@@ -77,17 +77,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 archive_path, fetched_at=fetched_at, output_dir=args.output_dir
             )
             quality = normalized.data.quality
-            print(f"Mapped {quality.raw_slot_count} raw slots to {quality.observation_count} Norwegian dates")
+            print(
+                f"Mapped {quality.raw_slot_count} raw slots to {quality.observation_count} "
+                f"{quality.frequency} observations across {quality.expected_date_count} Norwegian dates"
+            )
             print(
                 f"Padding: {quality.padding_count}; missing production: {quality.production_missing_count}; "
                 f"missing consumption: {quality.consumption_missing_count}"
             )
             print(
-                f"Completed-day candidates: {quality.historical_count}; "
+                f"Completed-period candidates: {quality.historical_count}; "
                 f"incomplete: {quality.incomplete_count}; future quarantined: {quality.forecast_count}"
             )
             print(f"Saved normalized artifacts to {normalized.output_dir}")
-            print("Training readiness blocked: daily provider units/aggregation require reference validation")
+            print("Training readiness blocked: provider units, API/export differences and source finality require validation")
     except (StatnettClientError, OSError, ValueError) as exc:
         print(f"Ingestion failed: {exc}", file=sys.stderr)
         return 1

@@ -1,4 +1,4 @@
-"""Replay a raw archive into inspectable daily candidates and a quality report."""
+"""Replay a raw archive into inspectable observation candidates and a quality report."""
 
 from dataclasses import asdict, dataclass
 from datetime import datetime

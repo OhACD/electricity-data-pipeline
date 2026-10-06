@@ -70,7 +70,7 @@ def test_cli_replay_does_not_create_api_client(tmp_path, monkeypatch, capsys):
         "--output-dir", str(tmp_path / "outputs"),
     ]) == 0
     output = capsys.readouterr()
-    assert "Mapped 3 raw slots to 3 Norwegian dates" in output.out
+    assert "Mapped 3 raw slots to 3 daily observations" in output.out
     assert "Training readiness blocked" in output.out
 
 
@@ -121,8 +121,14 @@ def test_live_normalization_archives_before_validation_failure(tmp_path, monkeyp
 
 
 def test_cli_fetch_and_normalize_preserves_source_and_quarantines_future(tmp_path, monkeypatch):
-    source = Archive(save_source(tmp_path)).read()
-    fetched_at = datetime(2025, 1, 2, 12, tzinfo=timezone.utc)
+    source = {
+        "StartPointUTC": int(pd.Timestamp("2025-01-01T11:00:00Z").timestamp() * 1000),
+        "EndPointUTC": int(pd.Timestamp("2025-01-01T13:00:00Z").timestamp() * 1000),
+        "PeriodTickMs": 3600000,
+        "Production": [None, 2, 3],
+        "Consumption": [4, 5, 6],
+    }
+    fetched_at = datetime(2025, 1, 1, 12, 30, tzinfo=timezone.utc)
     monkeypatch.setattr(
         "oslo_energy.pipeline.ingestion.datetime",
         SimpleNamespace(now=lambda zone: fetched_at),
@@ -145,6 +151,8 @@ def test_cli_fetch_and_normalize_preserves_source_and_quarantines_future(tmp_pat
     report = Archive(reports[0]).read()
     assert report["fetched_at_utc"] == fetched_at.isoformat()
     assert report["historical_count"] == report["incomplete_count"] == report["forecast_count"] == 1
+    assert report["frequency"] == "hourly"
+    assert report["period_tick_ms"] == 3600000
     historical = pd.read_csv(reports[0].parent / "historical_candidates.csv")
     assert historical["observation_date"].tolist() == ["2025-01-01"]
 
