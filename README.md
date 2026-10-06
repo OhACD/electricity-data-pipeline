@@ -1,6 +1,6 @@
 # Oslo Energy
 
-A learning project building a reproducible electricity-data foundation for future consumption forecasting. Statnett is the provider; coverage is **Norway**, not Oslo or NO1 alone.
+A research-oriented forecasting pipeline for Norwegian electricity consumption, built from Statnett’s public operational data. The project investigates data-product discrepancies, preserves raw measurement provenance, constructs leakage-safe temporal datasets, and evaluates statistical and machine-learning forecasting approaches.
 
 ## Current Status
 
