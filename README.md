@@ -15,7 +15,7 @@ The project currently provides the data pipeline for that research. It collects 
 
 ## Current Status
 
-The data pipeline supports hourly API collection, raw JSON archives, normalization that handles daylight-saving time, quality reports, offline replay, and optional PostgreSQL storage with correction history.
+The data pipeline supports hourly API collection, immutable raw JSON archives, DST-safe normalization, quality reports, offline replay, optional PostgreSQL storage with correction history, and incremental daily/reconciliation job modes.
 
 ```text
 Statnett hourly API -> raw archive -> normalized CSVs + quality report
@@ -54,6 +54,16 @@ This command contacts Statnett, saves a JSON snapshot under `data/raw/statnett/`
 The command prints the archive and output locations. The start date defaults to `2005-01-01`; omit `--normalize` to fetch and archive only. Generated data is ignored by Git. **Docker and PostgreSQL are not required for this workflow.**
 
 See the [pipeline guide](docs/pipeline.md) for replay, options, and troubleshooting, or the [PostgreSQL guide](docs/persistence.md) for optional storage.
+
+With PostgreSQL configured and migrations applied, preview or run incremental collection:
+
+```bash
+python -m oslo_energy.pipeline.run_ingestion --daily --dry-run
+python -m oslo_energy.pipeline.run_ingestion --daily
+python -m oslo_energy.pipeline.run_ingestion --reconcile
+```
+
+Daily mode catches up and refreshes three completed Oslo dates. Reconciliation repairs gaps/nulls and refreshes 90 days. Both automatically archive, normalize, and persist in bounded chunks. An empty database backfills from 2005 unless `--start-date` is supplied. See [incremental jobs](docs/pipeline.md#incremental-jobs) for policies and scheduling; no schedule is installed automatically.
 
 ## Documentation
 

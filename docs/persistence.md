@@ -15,7 +15,7 @@ python -m oslo_energy.database.migrate
 
 Wait until PostgreSQL accepts connections before running the migration. If startup is still in progress, retry the migration once the service is ready.
 
-The versioned [migration](../src/oslo_energy/database/migrations/001_statnett_hourly_candidates.sql) adds the current Statnett tables and a schema-version ledger. It does not reset the database or modify pre-existing legacy tables. Do not delete an existing Docker volume to apply it.
+The initial [migration](../src/oslo_energy/database/migrations/001_statnett_hourly_candidates.sql) adds the current Statnett tables and a schema-version ledger. The [capture identity migration](../src/oslo_energy/database/migrations/002_statnett_capture_identity.sql) allows identical content captured at different fetch times. Run the migration command again before using the updated collector. Existing rows remain; neither migration resets the database or modifies legacy tables. Do not delete an existing Docker volume to apply them.
 
 Fetch, normalize, and store data:
 
@@ -80,9 +80,10 @@ The repository compares source fetch times, not replay times:
 | Newer snapshot, unchanged values | Update last-seen provenance without adding a change record |
 | Older snapshot | Retain run metadata without replacing newer current values |
 | Equal fetch time, different values | Reject the ambiguous update |
-| Same archive checksum and normalizer version | Treat a consistent retry as already persisted |
+| Same archive checksum, original fetch time, and normalizer version | Treat a consistent retry as already persisted |
+| Identical archive content at a later fetch time | Record a new capture and apply the normal timestamp-ordering rules |
 
-A retry with inconsistent fetch metadata fails. Run metadata, revisions, and current observations commit in one transaction. A transaction-scoped advisory lock serializes repository writes to keep the audit and current values consistent.
+A retry with an explicitly conflicting requested start date fails; replay can omit that date. Always retain the original fetch timestamp: a different time identifies another capture and changes which hours are complete. Run metadata, revisions, and current observations commit in one transaction. A transaction-scoped advisory lock serializes repository writes to keep the audit and current values consistent.
 
 The [repository implementation](../src/oslo_energy/database/statnett_repository.py) contains the conflict and transaction rules. A new normalized output directory on replay does not itself imply a new database run.
 
@@ -92,7 +93,9 @@ The [repository implementation](../src/oslo_energy/database/statnett_repository.
 
 Repeated collection can capture changes from that point onward, but cannot reconstruct what Statnett published before the first capture. Historical backtesting must account for that limit: the latest current values may contain revisions unavailable at a past forecast date.
 
-Collection and replay are manual commands, not an installed schedule. Storage does not settle units, measurement accuracy, revision finality, or training eligibility.
+Daily catch-up and periodic reconciliation are available as CLI modes; see [incremental jobs](pipeline.md#incremental-jobs). No schedule is installed. Coverage queries distinguish absent hours from stored nulls and use UTC identity across DST. The daily high-water mark alone does not detect earlier gaps. Storage does not settle units, measurement accuracy, revision finality, or training eligibility.
+
+Reconciliation skips the provider's exact empty-response sentinel without adding observations, retains its raw archive, and records the range as unresolved in a JSON job summary. Valid partial responses are persisted normally but remain unresolved when requested hours or measurements are missing. Job modes return nonzero for unresolved coverage as well as execution failures; a nonzero status does not imply earlier committed chunks were rolled back. See the [pipeline guide](pipeline.md#incremental-jobs) for summary and exit-status rules.
 
 ## Database Tests
 

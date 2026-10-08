@@ -30,6 +30,48 @@ python -m oslo_energy.pipeline.run_ingestion --from-date 2025-01-01
 
 The requested start is Norwegian local midnight. A requested date range is not a guarantee that every measurement is available.
 
+Fetch a bounded range with an inclusive local end date:
+
+```bash
+python -m oslo_energy.pipeline.run_ingestion \
+  --from-date 2026-10-01 --to-date 2026-10-07 --normalize --persist
+```
+
+## Incremental Jobs
+
+Set up PostgreSQL and apply pending migrations as described in [storage](persistence.md). Both job modes automatically archive, normalize, and persist. They end at yesterday in `Europe/Oslo`, never at an assumed fixed number of UTC hours per day.
+
+Inspect the daily plan without fetching or writing, then run it:
+
+```bash
+python -m oslo_energy.pipeline.run_ingestion --daily --dry-run
+python -m oslo_energy.pipeline.run_ingestion --daily
+```
+
+The daily mode refreshes the last three completed local dates. If committed coverage ends earlier, it starts at the date of the latest stored hour's end to catch up after outages. This is a high-water mark, not proof that earlier hours are complete; reconciliation checks those holes separately. Null measurements do not prevent the watermark advancing.
+
+An empty database is backfilled from `2005-01-01`. Use `--start-date YYYY-MM-DD` to choose a different collection floor. Requests are split into at most 31 local days with `--chunk-days`; each chunk commits independently. HTTP, malformed-response, filesystem, and database failures return nonzero and stop the job, retaining available files for replay. Earlier committed chunks remain stored. A later daily run replans from committed coverage, not attempted requests.
+
+Inspect or run reconciliation:
+
+```bash
+python -m oslo_energy.pipeline.run_ingestion --reconcile --dry-run
+python -m oslo_energy.pipeline.run_ingestion --reconcile
+python -m oslo_energy.pipeline.run_ingestion --reconcile --refresh-days 0
+```
+
+Reconciliation checks the expected UTC-hour grid from the collection floor through yesterday for absent observations or null production/consumption. It groups affected local dates and merges them with a refresh of the previous 90 days, then chunks the result. `--refresh-days 0` requests only repairs. Missing source values may remain missing after repeated requests; no zeros or interpolated values are invented.
+
+Reconciliation recognizes the provider's exact empty-response sentinel: zero start/end/interval metadata and both measurement arrays empty. It retains the raw archive, marks the range unresolved, and continues later requests without normalizing or persisting the sentinel. Other malformed responses still stop the job. Daily and manual modes reject empty responses rather than silently skipping them.
+
+Every non-dry reconciliation run saves a uniquely named `reconciliation_<id>.json` under the normalized output directory. It lists attempted ranges, available archive paths and fetch times, request coverage, database run IDs when stored, and unresolved/failure reasons. Its summary separates complete, unresolved, failed, and unattempted requests. Fatal failures save the summary when the filesystem permits; failures before any request is attempted only report the error. Earlier successful commits are not rolled back.
+
+Job exit code `0` means the requested completed-hour coverage was returned with no null measurements; `1` also covers unresolved empty, truncated, or null-containing responses, even when valid rows were successfully stored. Valid partial responses do not stop later chunks. The summary describes responses received during this run, not a full post-run audit of all database history. Re-running may continue to report source gaps until the provider supplies values.
+
+Use a daily schedule a few hours after Oslo midnight and a monthly reconciliation schedule as an initial policy. Run both from the repository root with the virtual environment's Python and the required database environment variables. The commands are scheduler-ready, but this project does not install a cron, launchd, or hosted schedule. Use scheduler-level non-overlap and failure notifications; repository transactions serialize writes, not whole jobs.
+
+The three-day overlap and 90-day refresh are configurable policies, not verified Statnett finality guarantees. Corrections older than the refresh window require an explicit bounded refresh or a future rotating historical audit. Fetching and storage do not change training eligibility. Dry-run still needs PostgreSQL for coverage reads but makes no API requests or artifact writes.
+
 ## Inspect the Outputs
 
 Raw snapshots are stored under `data/raw/statnett/`. Normalization creates a unique directory under `data/normalized/statnett/` for each run. Both locations are ignored by Git.
@@ -42,6 +84,10 @@ Raw snapshots are stored under `data/raw/statnett/`. Normalization creates a uni
 | `quality.json` | Archive path, fetch time, interval, counts, missingness, continuity, and validation status |
 
 **Read the quality report before using the CSVs.** It is written last; CSVs without the report can be the result of an interrupted export.
+
+For bounded live normalization, `quality.json` also includes `request_coverage`: requested local dates, expected and returned completed UTC-hour counts, absent-hour count, and separate null counts for each metric. The CLI prints these counts. A day normally has 24 hours, but Oslo DST days have 23 or 25. Unfinished hours at the original fetch time are not counted as absent. Responses outside the requested date bounds are rejected rather than persisted.
+
+The original quality counts describe the returned source grid, not necessarily the entire requested range. A response can have no nulls or internal gaps and still omit hours at either endpoint. Coverage reporting does not pad, interpolate, or change measurements. Unbounded requests and replay without original request bounds do not infer requested coverage; their existing quality reports remain available.
 
 A candidate is an observation retained for further assessment, not an approved training example. `training_ready: false` remains in the report because units, source disagreement, and finality are unresolved. A missing measurement remains missing rather than becoming zero or an interpolated value.
 
@@ -67,6 +113,14 @@ Run `python -m oslo_energy.pipeline.run_ingestion --help` for the CLI reference.
 | Option | Behavior |
 | --- | --- |
 | `--from-date YYYY-MM-DD` | First requested local date; defaults to `2005-01-01`; cannot be combined with replay |
+| `--to-date YYYY-MM-DD` | Inclusive local end date for manual live requests |
+| `--daily` | Catch up and refresh recent completed days; automatically normalize and persist |
+| `--reconcile` | Repair absent/null hours and refresh recent history; automatically normalize and persist |
+| `--start-date YYYY-MM-DD` | Earliest collection date for either job mode; defaults to `2005-01-01` |
+| `--overlap-days N` | Daily overlap in local dates; positive, defaults to `3` |
+| `--refresh-days N` | Reconciliation refresh window; defaults to `90`; `0` repairs only |
+| `--chunk-days N` | Maximum local days per job request; positive, defaults to `31` |
+| `--dry-run` | Print either job's planned requests after coverage reads; do not fetch or write |
 | `--archive-dir PATH` | Raw archive location; defaults to `data/raw/statnett` |
 | `--normalize` | Normalize after a live fetch; replay already normalizes automatically |
 | `--replay PATH` | Normalize an existing archive rather than fetch data |
@@ -74,7 +128,7 @@ Run `python -m oslo_energy.pipeline.run_ingestion --help` for the CLI reference.
 | `--output-dir PATH` | Normalized output location; defaults to `data/normalized/statnett` |
 | `--persist` | Store completed hourly candidates; requires `--normalize` on live runs |
 
-Relative paths are resolved from the working directory. The CLI has no end-date option. The Python client supports an inclusive `to_date` for bounded research requests and caps future upper bounds at request time.
+Relative paths are resolved from the working directory. Manual fetching, replay, daily jobs, and reconciliation are mutually exclusive source modes. Job modes always end yesterday and cannot use `--to-date`. The client caps manual future upper bounds at request time.
 
 For database setup and replay with storage, see [PostgreSQL storage](persistence.md). Storage does not promote data to training-ready status.
 
@@ -87,6 +141,8 @@ For database setup and replay with storage, see [PostgreSQL storage](persistence
 | Normalization rejects a response | Inspect the retained raw archive; invalid structure is not silently repaired |
 | CSVs exist but `quality.json` does not | Treat the export as incomplete; correct the filesystem problem and replay the raw archive |
 | Persistence fails after normalization | The raw snapshot and normalized files remain available; correct the database problem and replay with `--persist` |
+| Reconciliation returns `1` after storing rows | Read its summary JSON; unresolved provider gaps are distinct from failed requests |
+| Reconciliation reports an empty response | The raw sentinel is retained; the range remains unresolved and later requests continue |
 | Historical rows have blank measurements | Source values were missing; do not interpret blanks as zero |
 
 Argument errors and failed runs return nonzero exit codes. A complete local day may still be unavailable even when some completed hours from that day have been exported.

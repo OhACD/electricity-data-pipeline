@@ -6,6 +6,7 @@ import hashlib
 import math
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from psycopg.types.json import Jsonb
@@ -116,6 +117,40 @@ class StatnettRepository:
             lambda: create_connection(load_config())
         )
 
+    def _coverage_query(self, query: str, params: tuple = ()) -> list[tuple]:
+        try:
+            with self._connection_factory() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+                    return cursor.fetchall()
+        except Exception as exc:
+            raise PersistenceError(f"Statnett coverage query failed: {exc}") from exc
+
+    def latest_period_end(self) -> datetime | None:
+        """Return the latest committed hour end, not an attempted fetch watermark."""
+        return self._coverage_query(
+            "SELECT MAX(period_end_utc) FROM statnett_hourly_observations_current"
+        )[0][0]
+
+    def dates_needing_repair(self, from_date: date, to_date: date) -> list[date]:
+        """Find Oslo dates containing absent or null UTC hours within inclusive bounds."""
+        if to_date < from_date:
+            raise ValueError("to_date must not precede from_date")
+        local_timezone = ZoneInfo("Europe/Oslo")
+        start = datetime.combine(from_date, datetime.min.time(), local_timezone)
+        end = datetime.combine(to_date + timedelta(days=1), datetime.min.time(), local_timezone)
+        rows = self._coverage_query(
+            "SELECT DISTINCT (expected.period_start_utc AT TIME ZONE 'Europe/Oslo')::DATE "
+            "AS observation_date FROM generate_series(%s::timestamptz, "
+            "%s::timestamptz - INTERVAL '1 hour', INTERVAL '1 hour') "
+            "AS expected(period_start_utc) "
+            "LEFT JOIN statnett_hourly_observations_current AS current USING (period_start_utc) "
+            "WHERE current.period_start_utc IS NULL OR current.production IS NULL "
+            "OR current.consumption IS NULL ORDER BY observation_date",
+            (start.astimezone(timezone.utc), end.astimezone(timezone.utc)),
+        )
+        return [row[0] for row in rows]
+
     def persist(
         self,
         data: NormalizedStatnettData,
@@ -126,9 +161,11 @@ class StatnettRepository:
     ) -> PersistenceResult:
         """Commit a candidate batch with archive provenance and quality metadata.
 
-        The raw archive must exist. Its SHA-256 and the normalizer version
-        identify an idempotent run; retries must retain the original fetch time
-        and requested start date. An advisory lock serializes transactions.
+        The raw archive must exist. Its SHA-256, original fetch time and the
+        normalizer version identify an idempotent capture. A later fetch of
+        identical content is a new capture. Replay may omit the requested start
+        date; an explicitly conflicting date is rejected. An advisory lock
+        serializes transactions.
 
         Current rows are keyed by UTC period start and updated only by newer
         fetches. Changed measurements produce revision records; conflicting
@@ -151,16 +188,15 @@ class StatnettRepository:
                     cursor.execute(
                         "SELECT id, fetched_at, requested_from_date, persisted_count "
                         "FROM statnett_ingestion_runs "
-                        "WHERE archive_sha256 = %s AND normalizer_version = %s",
-                        (archive_sha256, NORMALIZER_VERSION),
+                        "WHERE archive_sha256 = %s AND normalizer_version = %s AND fetched_at = %s",
+                        (archive_sha256, NORMALIZER_VERSION, fetched_at),
                     )
                     existing = cursor.fetchone()
                     if existing is not None:
-                        run_id, saved_fetch, saved_from, _persisted_count = existing
-                        if saved_fetch != fetched_at or saved_from != requested_from_date:
+                        run_id, _saved_fetch, saved_from, _persisted_count = existing
+                        if requested_from_date is not None and saved_from != requested_from_date:
                             raise ValueError(
-                                "This archive and normalizer version were already persisted "
-                                "with different fetch metadata"
+                                "This capture was already persisted with a different requested start date"
                             )
                         return PersistenceResult(run_id, len(candidates), 0, True)
 

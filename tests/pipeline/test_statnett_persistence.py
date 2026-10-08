@@ -1,6 +1,7 @@
 """Test persistence candidates, CLI artifacts, and opt-in PostgreSQL writes."""
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import hashlib
 import os
 from uuid import uuid4
@@ -155,6 +156,46 @@ def test_cli_database_failure_keeps_raw_and_normalized_artifacts(tmp_path, monke
     assert "simulated unavailable database" in capsys.readouterr().err
 
 
+def test_capture_retry_query_includes_original_fetch_time(tmp_path):
+    """An offline replay can omit the live request date and still reuse its capture."""
+    from datetime import date
+
+    fetched_at = datetime(2025, 1, 1, 2, tzinfo=timezone.utc)
+    path = tmp_path / "source.json"
+    Archive(path).write({"snapshot": "same"})
+    queries = []
+
+    class Cursor:
+        def execute(self, query, params):
+            queries.append((query, params))
+
+        def fetchone(self):
+            return (7, fetched_at, date(2025, 1, 1), 1)
+
+    class Connection:
+        @contextmanager
+        def cursor(self):
+            yield Cursor()
+
+    @contextmanager
+    def connection_factory():
+        yield Connection()
+
+    repository = StatnettRepository(connection_factory)
+    result = repository.persist(
+        normalized_hour(fetched_at - timedelta(hours=2), fetched_at, 1, 2),
+        archive_path=path, fetched_at=fetched_at,
+    )
+    assert result.idempotent and result.inserted_or_updated_count == 0
+    assert "AND fetched_at = %s" in queries[1][0]
+    assert queries[1][1][-1] == fetched_at
+    with pytest.raises(ValueError, match="requested start date"):
+        repository.persist(
+            normalized_hour(fetched_at - timedelta(hours=2), fetched_at, 1, 2),
+            archive_path=path, fetched_at=fetched_at, requested_from_date=date(2024, 1, 1),
+        )
+
+
 @pytest.fixture
 def postgres_database():
     """Apply migrations and yield a repository only when RUN_POSTGRES_TESTS=1."""
@@ -165,8 +206,8 @@ def postgres_database():
 
 
 def new_test_period():
-    """Choose a randomized UTC hour in the year-2200 integration-test range."""
-    return datetime(2200, 1, 1, tzinfo=timezone.utc) + timedelta(hours=uuid4().int % 100000)
+    """Choose a far-future winter hour where timezone databases agree on the date."""
+    return datetime(2200, 1, 1, tzinfo=timezone.utc) + timedelta(hours=uuid4().int % (31 * 24))
 
 
 def cleanup_test_runs(checksums):
@@ -276,3 +317,58 @@ def test_postgres_batch_rolls_back_run_and_observations(postgres_database, tmp_p
                 assert cursor.fetchone()[0] == 0
     finally:
         cleanup_test_runs([checksum])
+
+
+@pytest.mark.postgres
+def test_postgres_identical_captures_and_dst_gap_repair(postgres_database, tmp_path):
+    """Later identical responses gain completed hours; coverage detects absent and null hours."""
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    last_october_date = date(2030, 10, 31)
+    local_date = last_october_date - timedelta(days=(last_october_date.weekday() + 1) % 7)
+    local_timezone = ZoneInfo("Europe/Oslo")
+    start = datetime.combine(local_date, datetime.min.time(), local_timezone).astimezone(timezone.utc)
+    end = datetime.combine(local_date + timedelta(days=1), datetime.min.time(), local_timezone).astimezone(timezone.utc)
+    count = int((end - start).total_seconds() / 3600)
+    assert count == 25
+    source = {
+        "StartPointUTC": int(start.timestamp() * 1000),
+        "EndPointUTC": int((end - timedelta(hours=1)).timestamp() * 1000),
+        "PeriodTickMs": 3600000, "Production": [1] * count, "Consumption": [2] * count,
+    }
+    source["Production"][2] = None
+    checksums = []
+
+    def capture(name, fetched_at):
+        path = tmp_path / f"{name}.json"
+        Archive(path).write(source)
+        checksums.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        data = StatnettNormalizer().normalize(source, fetched_at=fetched_at)
+        result = postgres_database.persist(
+            data, archive_path=path, fetched_at=fetched_at, requested_from_date=local_date,
+        )
+        return path, data, result
+
+    try:
+        _, _, incomplete = capture("incomplete", start + timedelta(minutes=30))
+        assert incomplete.candidate_count == 0
+        path, data, complete = capture("complete", end)
+        assert complete.inserted_or_updated_count == 25
+        retry = postgres_database.persist(data, archive_path=path, fetched_at=end)
+        assert retry.idempotent and retry.run_id == complete.run_id
+        _, _, later = capture("later", end + timedelta(hours=1))
+        assert later.run_id != complete.run_id and later.inserted_or_updated_count == 25
+        with create_connection(load_config()) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM statnett_hourly_observations_current WHERE period_start_utc = %s",
+                    (start + timedelta(hours=3),),
+                )
+        assert postgres_database.dates_needing_repair(local_date, local_date) == [local_date]
+        source["Production"][2] = 1
+        capture("repaired", end + timedelta(hours=2))
+        assert postgres_database.dates_needing_repair(local_date, local_date) == []
+        assert postgres_database.latest_period_end() >= end
+    finally:
+        cleanup_test_runs(checksums)

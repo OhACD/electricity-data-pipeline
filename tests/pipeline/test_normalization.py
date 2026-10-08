@@ -1,6 +1,6 @@
 """Verify replay provenance, normalization partitions, and CLI validation failures."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -10,7 +10,8 @@ import pytest
 from oslo_energy.ingestion.archive import Archive
 from oslo_energy.ingestion.statnett_client import StatnettClient
 from oslo_energy.pipeline import run_ingestion
-from oslo_energy.pipeline.normalization import normalize_archive
+from oslo_energy.pipeline.normalization import EmptyStatnettResponse, normalize_archive
+from oslo_energy.pipeline.planning import DateRange
 
 
 def save_source(tmp_path):
@@ -175,3 +176,86 @@ def test_replay_missing_archive_returns_nonzero(tmp_path, capsys):
         "--replay", str(tmp_path / "missing.json"), "--fetched-at", "2025-01-04T00:00:00Z"
     ]) == 1
     assert "Ingestion failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("local_date, expected_hours", [
+    (date(2025, 3, 30), 23), (date(2025, 10, 26), 25), (date(2025, 1, 1), 24),
+])
+def test_requested_coverage_counts_absent_and_null_hours(tmp_path, local_date, expected_hours):
+    start = pd.Timestamp(local_date, tz="Europe/Oslo").tz_convert("UTC")
+    path = tmp_path / "partial.json"
+    count = expected_hours - 3
+    Archive(path).write({
+        "StartPointUTC": int((start + pd.Timedelta(hours=2)).timestamp() * 1000),
+        "EndPointUTC": int((start + pd.Timedelta(hours=expected_hours - 2)).timestamp() * 1000),
+        "PeriodTickMs": 3600000,
+        "Production": [None] + [1] * (count - 1), "Consumption": [2] * count,
+    })
+    result = normalize_archive(
+        path, fetched_at=start.to_pydatetime() + timedelta(days=2), output_dir=tmp_path / "outputs",
+        requested_range=DateRange(local_date, local_date),
+    )
+    coverage = result.coverage
+    assert coverage.expected_completed_hour_count == expected_hours
+    assert coverage.returned_completed_hour_count == count
+    assert coverage.missing_hour_count == 3
+    assert coverage.production_missing_count == 1
+    assert coverage.consumption_missing_count == 0
+    assert coverage.unresolved
+    report = Archive(result.output_dir / "quality.json").read()
+    assert report["request_coverage"]["missing_hour_count"] == 3
+    assert len(result.data.observations) == count
+
+
+def test_coverage_does_not_count_unfinished_hours_as_absent(tmp_path):
+    start = pd.Timestamp("2025-01-01", tz="Europe/Oslo").tz_convert("UTC")
+    path = tmp_path / "ongoing.json"
+    Archive(path).write({
+        "StartPointUTC": int(start.timestamp() * 1000),
+        "EndPointUTC": int((start + pd.Timedelta(hours=2)).timestamp() * 1000),
+        "PeriodTickMs": 3600000, "Production": [1, 2, 3], "Consumption": [4, 5, 6],
+    })
+    result = normalize_archive(
+        path, fetched_at=start.to_pydatetime() + timedelta(hours=2, minutes=30),
+        output_dir=tmp_path / "outputs", requested_range=DateRange(date(2025, 1, 1), date(2025, 1, 1)),
+    )
+    assert result.coverage.expected_completed_hour_count == 2
+    assert result.coverage.returned_completed_hour_count == 2
+    assert result.coverage.missing_hour_count == 0
+    assert not result.coverage.unresolved
+
+
+@pytest.mark.parametrize("changes, is_sentinel", [
+    ({}, True), ({"PeriodTickMs": 3600000}, False),
+    ({"PeriodTickMs": False}, False), ({"StartPointUTC": "0"}, False),
+    ({"Production": [1]}, False), ({"Consumption": None}, False),
+])
+def test_only_exact_empty_sentinel_has_special_error(tmp_path, changes, is_sentinel):
+    source = {"StartPointUTC": 0.0, "EndPointUTC": 0.0, "PeriodTickMs": 0,
+              "Production": [], "Consumption": []}
+    source.update(changes)
+    path = tmp_path / "empty.json"
+    Archive(path).write(source)
+    with pytest.raises(ValueError) as exc:
+        normalize_archive(path, fetched_at=datetime(2026, 10, 8, tzinfo=timezone.utc),
+                          output_dir=tmp_path / "outputs")
+    assert isinstance(exc.value, EmptyStatnettResponse) == is_sentinel
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_bounded_response_outside_request_is_rejected(tmp_path):
+    start = pd.Timestamp("2025-01-01", tz="Europe/Oslo").tz_convert("UTC")
+    path = tmp_path / "outside.json"
+    Archive(path).write({
+        "StartPointUTC": int((start - pd.Timedelta(hours=1)).timestamp() * 1000),
+        "EndPointUTC": int(start.timestamp() * 1000), "PeriodTickMs": 3600000,
+        "Production": [1, 2], "Consumption": [3, 4],
+    })
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="outside the requested date range"):
+        normalize_archive(
+            path, fetched_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+            output_dir=tmp_path / "outputs", requested_range=DateRange(date(2025, 1, 1), date(2025, 1, 1)),
+        )
+    assert path.read_bytes() == original
+    assert not (tmp_path / "outputs").exists()

@@ -118,6 +118,34 @@ def test_cli_custom_archive_dir(tmp_path, monkeypatch):
     assert len(list(archive_dir.glob("*.json"))) == 1
 
 
+def test_cli_bounded_range(tmp_path, monkeypatch):
+    """Forward an inclusive Oslo end date to the hourly API."""
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(
+        run_ingestion, "StatnettClient",
+        lambda: StatnettClient(transport=httpx.MockTransport(respond)),
+    )
+    assert run_ingestion.main([
+        "--from-date", "2025-10-26", "--to-date", "2025-10-26",
+        "--archive-dir", str(tmp_path),
+    ]) == 0
+    params = requests[0].url.params
+    assert int(params["ToInTicks"]) - int(params["FromInTicks"]) == 25 * 3600000 - 1
+
+
+def test_cli_reversed_range_fails_before_request(monkeypatch):
+    """Reject reversed ranges without fetching."""
+    monkeypatch.setattr(run_ingestion, "StatnettClient", lambda: pytest.fail("unexpected request"))
+    with pytest.raises(SystemExit) as exc:
+        run_ingestion.main(["--from-date", "2025-01-02", "--to-date", "2025-01-01"])
+    assert exc.value.code == 2
+
+
 @pytest.mark.parametrize("value", ["bad", "2025-02-30", "20250101", "2025-1-1"])
 def test_cli_invalid_date_fails_before_request(monkeypatch, value):
     """Invalid start dates cause parser exit code 2 before client construction."""

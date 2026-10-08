@@ -16,6 +16,7 @@ class RawIngestionResult:
     archive_path: Path
     from_date: date
     fetched_at: datetime
+    to_date: date | None = None
 
 
 class StatnettIngestion:
@@ -26,14 +27,16 @@ class StatnettIngestion:
         self.client = client
         self.archive_dir = Path(archive_dir)
 
-    def run(self, from_date: date) -> RawIngestionResult:
+    def run(self, from_date: date, *, to_date: date | None = None) -> RawIngestionResult:
         """Fetch hourly data and write a uniquely named raw JSON archive.
 
         Record the UTC fetch time after the request completes and return it
         with the archive path and requested date. Request and archive errors
         propagate; a failed request does not create an archive.
         """
-        raw_data = self.client.get_production_consumption(from_date.isoformat())
+        raw_data = self.client.get_production_consumption(
+            from_date.isoformat(), to_date=to_date.isoformat() if to_date else None
+        )
         fetched_at = datetime.now(timezone.utc)
         filename = (
             f"statnett_from_{from_date.isoformat()}_"
@@ -42,4 +45,4 @@ class StatnettIngestion:
         archive_path = self.archive_dir / filename
         Archive(archive_path).write(raw_data)
 
-        return RawIngestionResult(archive_path, from_date, fetched_at)
+        return RawIngestionResult(archive_path, from_date, fetched_at, to_date)
