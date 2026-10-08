@@ -11,17 +11,28 @@ from oslo_energy.ingestion.statnett_client import StatnettClient
 
 @dataclass(frozen=True)
 class RawIngestionResult:
+    """Raw archive path, requested start date and post-request UTC fetch time."""
+
     archive_path: Path
     from_date: date
     fetched_at: datetime
 
 
 class StatnettIngestion:
+    """Archive raw Statnett responses before normalization or persistence."""
+
     def __init__(self, client: StatnettClient, archive_dir: str | Path):
+        """Use the supplied API client and raw archive directory."""
         self.client = client
         self.archive_dir = Path(archive_dir)
 
     def run(self, from_date: date) -> RawIngestionResult:
+        """Fetch hourly data and write a uniquely named raw JSON archive.
+
+        Record the UTC fetch time after the request completes and return it
+        with the archive path and requested date. Request and archive errors
+        propagate; a failed request does not create an archive.
+        """
         raw_data = self.client.get_production_consumption(from_date.isoformat())
         fetched_at = datetime.now(timezone.utc)
         filename = (

@@ -27,6 +27,13 @@ class PersistenceError(OSError):
 
 @dataclass(frozen=True)
 class PersistenceResult:
+    """Report the run identity, submitted candidates, and current-row writes.
+
+    An idempotent retry reuses its existing run and performs no row writes.
+    New runs may write fewer current rows than candidates when snapshots are
+    stale or have the same fetch time as existing observations.
+    """
+
     run_id: int
     candidate_count: int
     inserted_or_updated_count: int
@@ -34,6 +41,7 @@ class PersistenceResult:
 
 
 def _utc_datetime(value: Any, column: str) -> datetime:
+    """Convert a timezone-aware timestamp value to a UTC datetime."""
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is None:
         raise ValueError(f"{column} must be timezone-aware")
@@ -41,6 +49,7 @@ def _utc_datetime(value: Any, column: str) -> datetime:
 
 
 def _measurement(value: Any, column: str) -> float | None:
+    """Map missing values to SQL null and require finite nonnegative numbers."""
     if pd.isna(value):
         return None
     if isinstance(value, bool):
@@ -52,6 +61,14 @@ def _measurement(value: Any, column: str) -> float | None:
 
 
 def _prepare_candidates(data: NormalizedStatnettData, fetched_at: datetime) -> list[tuple]:
+    """Validate historical hourly candidates and build database staging rows.
+
+    Require training-blocked hourly metadata, an aware fetch time, unique UTC
+    hour starts, completed one-hour intervals, and matching Oslo dates. Preserve
+    missing measurements as nulls and include source indices and UTC fetch
+    provenance. Incomplete and future partitions are not staged. Invalid
+    candidates raise ValueError; storage eligibility does not certify quality.
+    """
     quality = data.quality
     if quality.frequency != "hourly" or quality.period_tick_ms != 3_600_000:
         raise ValueError("Only normalized hourly Statnett candidates can be persisted")
@@ -91,7 +108,10 @@ def _prepare_candidates(data: NormalizedStatnettData, fetched_at: datetime) -> l
 
 
 class StatnettRepository:
+    """Persist hourly candidates and revision provenance in PostgreSQL."""
+
     def __init__(self, connection_factory: Callable[[], Any] | None = None):
+        """Use an injected connection factory or environment-based PostgreSQL."""
         self._connection_factory = connection_factory or (
             lambda: create_connection(load_config())
         )
@@ -104,6 +124,21 @@ class StatnettRepository:
         fetched_at: datetime,
         requested_from_date: date | None = None,
     ) -> PersistenceResult:
+        """Commit a candidate batch with archive provenance and quality metadata.
+
+        The raw archive must exist. Its SHA-256 and the normalizer version
+        identify an idempotent run; retries must retain the original fetch time
+        and requested start date. An advisory lock serializes transactions.
+
+        Current rows are keyed by UTC period start and updated only by newer
+        fetches. Changed measurements produce revision records; conflicting
+        values at equal fetch times raise ValueError. Stale snapshots retain run
+        provenance without overwriting current observations. Run metadata,
+        current rows, and revisions commit or roll back together.
+
+        Validation errors propagate as ValueError; other transaction failures
+        become PersistenceError. Persisting candidates does not enable training.
+        """
         if not archive_path.is_file():
             raise ValueError(f"Raw archive does not exist: {archive_path}")
         candidates = _prepare_candidates(data, fetched_at)

@@ -12,12 +12,15 @@ class StatnettClientError(Exception):
 
 
 class StatnettClient:
+    """Request hourly Statnett data without transforming provider values."""
+
     def __init__(
         self,
         base_url: str = "https://driftsdata.statnett.no/restapi",
         timeout: float = 30,
         transport: httpx.BaseTransport | None = None,
     ):
+        """Configure the API base URL, timeout and optional HTTP transport."""
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.transport = transport
@@ -25,6 +28,18 @@ class StatnettClient:
     def get_production_consumption(
         self, from_date: str, *, to_date: str | None = None
     ) -> dict[str, Any]:
+        """Fetch hourly data from Oslo midnight using Unix-millisecond bounds.
+
+        The optional ISO ``to_date`` is inclusive in Europe/Oslo; the end
+        boundary is capped at request time. The returned JSON object retains
+        provider values and metadata without unit conversion or normalization.
+
+        Raises:
+            ValueError: A date is invalid, the range is reversed, or its start
+                is in the future.
+            StatnettClientError: HTTP fails, JSON is invalid, or the response
+                is not a JSON object.
+        """
         url = f"{self.base_url}/ProductionConsumption/GetData"
         local_timezone = ZoneInfo("Europe/Oslo")
         start_date = date.fromisoformat(from_date)

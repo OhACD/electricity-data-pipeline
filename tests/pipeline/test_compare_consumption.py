@@ -1,3 +1,5 @@
+"""Test complete Oslo-day consumption comparisons and invalid export inputs."""
+
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -7,6 +9,7 @@ from oslo_energy.pipeline.compare_consumption import compare_consumption
 
 
 def comparison_inputs(start, count):
+    """Build paired UTC-hour frames with API consumption ten percent higher."""
     periods = pd.date_range(start, periods=count, freq="h", tz="UTC")
     api = pd.DataFrame({
         "period_start_utc": periods,
@@ -20,6 +23,7 @@ def comparison_inputs(start, count):
 
 @pytest.mark.parametrize("start,count", [("2025-03-29 23:00", 23), ("2025-10-25 22:00", 25)])
 def test_comparison_uses_complete_local_dst_days(start, count):
+    """Compare complete 23- and 25-hour Oslo days against export totals."""
     api, exported = comparison_inputs(start, count)
     result = compare_consumption(api, exported, fetched_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert result["expected_hours"].tolist() == [count]
@@ -30,6 +34,7 @@ def test_comparison_uses_complete_local_dst_days(start, count):
 
 @pytest.mark.parametrize("problem", ["api_null", "csv_null", "csv_gap", "unfinished"])
 def test_partial_days_are_not_given_an_error_total(problem):
+    """Withhold totals and percentage errors for missing or unfinished hours."""
     api, exported = comparison_inputs("2025-01-01 23:00", 24)
     fetched_at = datetime(2025, 1, 3, tzinfo=timezone.utc)
     if problem == "api_null":
@@ -48,6 +53,7 @@ def test_partial_days_are_not_given_an_error_total(problem):
 
 
 def test_duplicate_export_hours_are_rejected():
+    """Reject exports containing duplicate UTC hour identities."""
     api, exported = comparison_inputs("2025-01-01 23:00", 24)
     exported = pd.concat([exported, exported.iloc[:1]])
     with pytest.raises(ValueError, match="Duplicate UTC"):
@@ -55,6 +61,7 @@ def test_duplicate_export_hours_are_rejected():
 
 
 def test_zero_export_denominator_does_not_produce_infinite_error():
+    """Leave percentage error missing when a complete export total is zero."""
     api, exported = comparison_inputs("2025-01-01 23:00", 24)
     exported["consumption"] = 0.0
     result = compare_consumption(api, exported, fetched_at=datetime(2025, 1, 3, tzinfo=timezone.utc))

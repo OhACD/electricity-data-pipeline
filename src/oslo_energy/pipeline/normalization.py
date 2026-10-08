@@ -14,6 +14,8 @@ from oslo_energy.transformation.statnett_normalizer import (
 
 @dataclass(frozen=True)
 class NormalizationResult:
+    """Normalized candidate data and the directory containing its artifacts."""
+
     output_dir: Path
     data: NormalizedStatnettData
 
@@ -21,6 +23,16 @@ class NormalizationResult:
 def normalize_archive(
     archive_path: Path, *, fetched_at: datetime, output_dir: Path
 ) -> NormalizationResult:
+    """Replay raw data into candidate CSVs and a provenance-bearing report.
+
+    ``fetched_at`` must be the original timezone-aware fetch timestamp used
+    for completed, incomplete and future period classification. Preserve the
+    source archive and provider units, writing each replay to a new directory
+    beneath ``output_dir``. The quality report retains ``training_ready=False``.
+
+    Archive, validation and filesystem errors propagate. CSV writes precede
+    ``quality.json``; a write failure can leave partial output artifacts.
+    """
     source = Archive(archive_path).read()
     data = StatnettNormalizer().normalize(source, fetched_at=fetched_at)
     destination = output_dir / f"{archive_path.stem}_{uuid4().hex}"

@@ -12,6 +12,7 @@ from oslo_energy.pipeline.normalization import normalize_archive
 
 
 def parse_date(value: str) -> date:
+    """Parse an exact YYYY-MM-DD date or raise ArgumentTypeError."""
     try:
         parsed = date.fromisoformat(value)
         if parsed.isoformat() != value:
@@ -22,6 +23,7 @@ def parse_date(value: str) -> date:
 
 
 def parse_fetched_at(value: str) -> datetime:
+    """Parse an aware ISO timestamp, accepting Z, or raise ArgumentTypeError."""
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -34,6 +36,16 @@ def parse_fetched_at(value: str) -> datetime:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run raw ingestion or offline replay, with optional database persistence.
+
+    Live normalization follows raw archival; replay requires the original
+    aware fetch timestamp and makes no API request. Persistence requires live
+    normalization or replay and does not certify training readiness.
+
+    Return 0 on success or 1 after reporting a caught client, filesystem or
+    validation error to stderr. Argument errors raise SystemExit via argparse.
+    ``argv=None`` reads arguments from the process command line.
+    """
     parser = argparse.ArgumentParser(description="Fetch Statnett data or normalize an archive.")
     source = parser.add_mutually_exclusive_group()
     source.add_argument(

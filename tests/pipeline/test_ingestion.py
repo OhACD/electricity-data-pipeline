@@ -1,3 +1,5 @@
+"""Verify raw ingestion provenance, archive isolation, and CLI failure handling."""
+
 import subprocess
 import sys
 from datetime import date, datetime, timezone
@@ -12,12 +14,14 @@ from oslo_energy.pipeline.ingestion import StatnettIngestion
 
 
 def make_client(payload):
+    """Return a client whose mock transport responds with the supplied JSON payload."""
     return StatnettClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
     )
 
 
 def test_ingestion_archives_raw_response(tmp_path):
+    """Ingestion preserves raw data and records the requested date and UTC fetch time."""
     payload = {"Production": [None, 12.5], "Consumption": [10.0, None], "metadata": "raw"}
 
     result = StatnettIngestion(make_client(payload), tmp_path).run(date(2005, 1, 1))
@@ -30,9 +34,13 @@ def test_ingestion_archives_raw_response(tmp_path):
 
 
 def test_repeated_ingestion_creates_distinct_archives(tmp_path, monkeypatch):
+    """Repeated ingestion creates distinct intact archives even at the same fetch time."""
     class FixedClock:
+        """Supply a constant fetch time to expose archive filename collisions."""
+
         @staticmethod
         def now(zone):
+            """Return midnight on January 1, 2026 in the requested timezone."""
             return datetime(2026, 1, 1, tzinfo=zone)
 
     monkeypatch.setattr("oslo_energy.pipeline.ingestion.datetime", FixedClock)
@@ -47,6 +55,7 @@ def test_repeated_ingestion_creates_distinct_archives(tmp_path, monkeypatch):
 
 
 def test_fetch_failure_does_not_create_archive(tmp_path):
+    """A failed fetch propagates the client error without creating the archive directory."""
     client = StatnettClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(500))
     )
@@ -58,6 +67,7 @@ def test_fetch_failure_does_not_create_archive(tmp_path):
 
 
 def test_archive_failure_propagates(tmp_path):
+    """Ingestion propagates a filesystem error from an invalid archive directory."""
     path = tmp_path / "not-a-directory"
     path.write_text("existing file", encoding="utf-8")
 
@@ -67,9 +77,11 @@ def test_archive_failure_propagates(tmp_path):
 
 @pytest.mark.parametrize("start_date", [None, "2025-01-01"])
 def test_cli_defaults_and_explicit_start_date(tmp_path, monkeypatch, capsys, start_date):
+    """The CLI requests the default or explicit Oslo start date and reports its archive."""
     requested_dates = []
 
     def respond(request):
+        """Record the UTC start bound, assert hourly frequency, and return raw data."""
         requested_dates.append(
             datetime.fromtimestamp(int(request.url.params["FromInTicks"]) / 1000, timezone.utc)
         )
@@ -98,6 +110,7 @@ def test_cli_defaults_and_explicit_start_date(tmp_path, monkeypatch, capsys, sta
 
 
 def test_cli_custom_archive_dir(tmp_path, monkeypatch):
+    """The CLI writes one archive into the explicitly selected directory."""
     monkeypatch.setattr(run_ingestion, "StatnettClient", lambda: make_client({}))
     archive_dir = tmp_path / "custom"
 
@@ -107,7 +120,9 @@ def test_cli_custom_archive_dir(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("value", ["bad", "2025-02-30", "20250101", "2025-1-1"])
 def test_cli_invalid_date_fails_before_request(monkeypatch, value):
+    """Invalid start dates cause parser exit code 2 before client construction."""
     def unexpected_client():
+        """Fail if invalid date arguments reach client construction."""
         pytest.fail("Invalid dates must fail before creating the client")
 
     monkeypatch.setattr(run_ingestion, "StatnettClient", unexpected_client)
@@ -119,6 +134,7 @@ def test_cli_invalid_date_fails_before_request(monkeypatch, value):
 
 
 def test_cli_api_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
+    """An API failure returns code 1, reports stderr, and leaves no archive."""
     monkeypatch.setattr(
         run_ingestion,
         "StatnettClient",
@@ -135,6 +151,7 @@ def test_cli_api_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
 
 
 def test_cli_archive_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
+    """An archive filesystem failure returns code 1 and reports ingestion failure."""
     monkeypatch.setattr(run_ingestion, "StatnettClient", lambda: make_client({}))
     path = tmp_path / "not-a-directory"
     path.write_text("existing file", encoding="utf-8")
@@ -144,6 +161,7 @@ def test_cli_archive_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
 
 
 def test_raw_cli_does_not_import_database():
+    """Importing the raw ingestion CLI in a fresh interpreter loads no database modules."""
     result = subprocess.run(
         [
             sys.executable,

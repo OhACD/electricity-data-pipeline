@@ -6,6 +6,12 @@ from oslo_energy.database.connection import create_connection, load_config
 
 
 def apply_migrations() -> list[str]:
+    """Apply unrecorded SQL files in filename order and return their filenames.
+
+    A transaction-scoped advisory lock serializes migration runs. All pending
+    migrations and their version records commit together; a failure rolls back
+    the transaction. Recorded filenames are skipped on subsequent runs.
+    """
     migration_dir = Path(__file__).with_name("migrations")
     migrations = sorted(migration_dir.glob("*.sql"))
     applied_now = []
@@ -35,6 +41,7 @@ def apply_migrations() -> list[str]:
 
 
 def main() -> int:
+    """Apply migrations, print their status, and return zero on success."""
     applied = apply_migrations()
     if applied:
         print("Applied migrations: " + ", ".join(applied))

@@ -1,3 +1,5 @@
+"""Test persistence candidates, CLI artifacts, and opt-in PostgreSQL writes."""
+
 from datetime import datetime, timedelta, timezone
 import hashlib
 import os
@@ -21,6 +23,7 @@ from oslo_energy.transformation.statnett_normalizer import StatnettNormalizer
 
 
 def normalized_hour(start, fetched_at, production, consumption):
+    """Normalize a single hourly payload using the supplied fetch cutoff."""
     timestamp = int(start.timestamp() * 1000)
     source = {
         "StartPointUTC": timestamp,
@@ -33,6 +36,7 @@ def normalized_hour(start, fetched_at, production, consumption):
 
 
 def test_candidate_preparation_preserves_nulls_and_repeated_dst_hour():
+    """Keep nulls and distinct UTC keys for the repeated Oslo autumn hour."""
     fetched_at = datetime(2025, 10, 26, 3, tzinfo=timezone.utc)
     start = datetime(2025, 10, 26, 0, tzinfo=timezone.utc)
     source = {
@@ -54,6 +58,7 @@ def test_candidate_preparation_preserves_nulls_and_repeated_dst_hour():
 
 
 def test_candidate_preparation_rejects_legacy_daily_data():
+    """Reject legacy daily observations as hourly persistence candidates."""
     fetched_at = datetime(2025, 1, 4, tzinfo=timezone.utc)
     midnight = pd.Timestamp("2025-01-01", tz="Europe/Oslo")
     daily_source = {
@@ -70,7 +75,9 @@ def test_candidate_preparation_rejects_legacy_daily_data():
 
 
 def test_cli_persist_is_opt_in_and_live_requires_normalization(tmp_path, monkeypatch):
+    """Reject live persistence without normalization before fetching or archiving."""
     def unexpected_client():
+        """Fail if invalid persistence arguments reach client construction."""
         pytest.fail("Persistence argument validation must happen before fetching")
 
     monkeypatch.setattr(run_ingestion, "StatnettClient", unexpected_client)
@@ -81,6 +88,7 @@ def test_cli_persist_is_opt_in_and_live_requires_normalization(tmp_path, monkeyp
 
 
 def test_cli_replay_persistence_uses_archive_cutoff_and_keeps_artifacts(tmp_path, monkeypatch):
+    """Forward replay provenance to persistence and retain normalized artifacts."""
     fetched_at = datetime(2025, 1, 1, 2, tzinfo=timezone.utc)
     source = {
         "StartPointUTC": int(datetime(2025, 1, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
@@ -94,7 +102,10 @@ def test_cli_replay_persistence_uses_archive_cutoff_and_keeps_artifacts(tmp_path
     calls = []
 
     class Repository:
+        """Capture persistence calls and simulate a successful database write."""
+
         def persist(self, data, **kwargs):
+            """Record candidates and provenance before returning a fixed result."""
             calls.append((data, kwargs))
             return PersistenceResult(7, 1, 1, False)
 
@@ -112,6 +123,7 @@ def test_cli_replay_persistence_uses_archive_cutoff_and_keeps_artifacts(tmp_path
 
 
 def test_cli_database_failure_keeps_raw_and_normalized_artifacts(tmp_path, monkeypatch, capsys):
+    """Report persistence failure without changing raw or removing normalized data."""
     fetched_at = datetime(2025, 1, 1, 2, tzinfo=timezone.utc)
     start = datetime(2025, 1, 1, 0, tzinfo=timezone.utc)
     timestamp = int(start.timestamp() * 1000)
@@ -126,7 +138,10 @@ def test_cli_database_failure_keeps_raw_and_normalized_artifacts(tmp_path, monke
     original = archive_path.read_bytes()
 
     class Repository:
+        """Simulate an unavailable database during replay persistence."""
+
         def persist(self, data, **kwargs):
+            """Raise the persistence error that the CLI must report."""
             raise PersistenceError("simulated unavailable database")
 
     monkeypatch.setattr(statnett_repository, "StatnettRepository", Repository)
@@ -142,6 +157,7 @@ def test_cli_database_failure_keeps_raw_and_normalized_artifacts(tmp_path, monke
 
 @pytest.fixture
 def postgres_database():
+    """Apply migrations and yield a repository only when RUN_POSTGRES_TESTS=1."""
     if os.getenv("RUN_POSTGRES_TESTS") != "1":
         pytest.skip("Set RUN_POSTGRES_TESTS=1 to enable PostgreSQL integration tests")
     apply_migrations()
@@ -149,10 +165,12 @@ def postgres_database():
 
 
 def new_test_period():
+    """Choose a randomized UTC hour in the year-2200 integration-test range."""
     return datetime(2200, 1, 1, tzinfo=timezone.utc) + timedelta(hours=uuid4().int % 100000)
 
 
 def cleanup_test_runs(checksums):
+    """Delete revisions, current observations, and runs linked to test checksums."""
     if not checksums:
         return
     with create_connection(load_config()) as connection:
@@ -179,12 +197,14 @@ def cleanup_test_runs(checksums):
 
 @pytest.mark.postgres
 def test_postgres_retries_corrections_nulls_and_stale_snapshots(postgres_database, tmp_path):
+    """Verify idempotent retries, null corrections, and conflicting or stale fetches."""
     start = new_test_period()
     fetched = start + timedelta(hours=2)
     paths = []
     checksums = []
 
     def persist(name, production, consumption, fetched_at):
+        """Archive and persist one snapshot while tracking its path and cleanup hash."""
         path = tmp_path / f"{name}.json"
         Archive(path).write({"snapshot": name})
         paths.append(path)
@@ -230,6 +250,7 @@ def test_postgres_retries_corrections_nulls_and_stale_snapshots(postgres_databas
 
 @pytest.mark.postgres
 def test_postgres_batch_rolls_back_run_and_observations(postgres_database, tmp_path):
+    """Roll back both run and observation rows when a candidate exceeds SQL limits."""
     start = new_test_period()
     fetched = start + timedelta(hours=2)
     path = tmp_path / "rollback.json"

@@ -9,6 +9,8 @@ import psycopg
 
 @dataclass(frozen=True)
 class DatabaseConfig:
+    """Hold PostgreSQL connection settings and credentials."""
+
     host: str
     port: int
     name: str
@@ -16,6 +18,7 @@ class DatabaseConfig:
     password: str
 
 def load_config() -> DatabaseConfig:
+    """Read POSTGRES_* environment settings with local development defaults."""
     return DatabaseConfig(
         host=os.getenv("POSTGRES_HOST", "localhost"),
         port=int(os.getenv("POSTGRES_PORT", 5432)),
@@ -25,6 +28,7 @@ def load_config() -> DatabaseConfig:
     )
 
 def create_connection(config: DatabaseConfig):
+    """Open a psycopg connection using the supplied database configuration."""
     return psycopg.connect(
         host=config.host,
         port=config.port,

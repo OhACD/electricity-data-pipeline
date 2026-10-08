@@ -1,3 +1,5 @@
+"""Verify replay provenance, normalization partitions, and CLI validation failures."""
+
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ from oslo_energy.pipeline.normalization import normalize_archive
 
 
 def save_source(tmp_path):
+    """Archive three legacy daily slots with a missing first production value."""
     path = tmp_path / "raw.json"
     Archive(path).write({
         "StartPointUTC": pd.Timestamp("2025-01-01", tz="Europe/Oslo").timestamp() * 1000,
@@ -24,6 +27,7 @@ def save_source(tmp_path):
 
 
 def test_replay_preserves_raw_and_separates_outputs(tmp_path):
+    """Replay preserves raw bytes and missing values while partitioning days by fetch time."""
     path = save_source(tmp_path)
     original = path.read_bytes()
     fetched_at = datetime(2025, 1, 2, 12, tzinfo=timezone.utc)
@@ -46,6 +50,7 @@ def test_replay_preserves_raw_and_separates_outputs(tmp_path):
 
 
 def test_repeated_replay_does_not_overwrite_previous_outputs(tmp_path):
+    """Repeated replay uses distinct output directories and preserves the earlier report."""
     path = save_source(tmp_path)
     options = {"fetched_at": datetime(2025, 1, 4, tzinfo=timezone.utc), "output_dir": tmp_path / "outputs"}
 
@@ -58,9 +63,11 @@ def test_repeated_replay_does_not_overwrite_previous_outputs(tmp_path):
 
 
 def test_cli_replay_does_not_create_api_client(tmp_path, monkeypatch, capsys):
+    """Offline replay succeeds without an API client and reports blocked training readiness."""
     path = save_source(tmp_path)
 
     def unexpected_client():
+        """Fail if offline replay constructs an API client."""
         pytest.fail("Replay must not create an API client")
 
     monkeypatch.setattr(run_ingestion, "StatnettClient", unexpected_client)
@@ -80,7 +87,9 @@ def test_cli_replay_does_not_create_api_client(tmp_path, monkeypatch, capsys):
              ["--replay", "raw.json", "--from-date", "2025-01-01"]],
 )
 def test_invalid_replay_context_fails_before_fetch(args, monkeypatch):
+    """Invalid replay arguments cause parser exit code 2 before client construction."""
     def unexpected_client():
+        """Fail if invalid replay arguments reach client construction."""
         pytest.fail("Invalid replay context must not fetch")
 
     monkeypatch.setattr(run_ingestion, "StatnettClient", unexpected_client)
@@ -92,6 +101,7 @@ def test_invalid_replay_context_fails_before_fetch(args, monkeypatch):
 
 
 def test_invalid_archive_has_no_normalized_output(tmp_path, capsys):
+    """An archive missing required fields fails replay without creating normalized output."""
     path = tmp_path / "invalid.json"
     Archive(path).write({"Production": []})
     output_dir = tmp_path / "outputs"
@@ -105,6 +115,7 @@ def test_invalid_archive_has_no_normalized_output(tmp_path, capsys):
 
 
 def test_live_normalization_archives_before_validation_failure(tmp_path, monkeypatch):
+    """Live ingestion archives an invalid payload before normalization rejects it."""
     monkeypatch.setattr(run_ingestion, "StatnettClient", lambda: StatnettClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"raw": True}))
     ))
@@ -121,6 +132,7 @@ def test_live_normalization_archives_before_validation_failure(tmp_path, monkeyp
 
 
 def test_cli_fetch_and_normalize_preserves_source_and_quarantines_future(tmp_path, monkeypatch):
+    """Live hourly normalization preserves raw data and reports all three time partitions."""
     source = {
         "StartPointUTC": int(pd.Timestamp("2025-01-01T11:00:00Z").timestamp() * 1000),
         "EndPointUTC": int(pd.Timestamp("2025-01-01T13:00:00Z").timestamp() * 1000),
@@ -158,6 +170,7 @@ def test_cli_fetch_and_normalize_preserves_source_and_quarantines_future(tmp_pat
 
 
 def test_replay_missing_archive_returns_nonzero(tmp_path, capsys):
+    """A missing replay archive returns code 1 and reports ingestion failure."""
     assert run_ingestion.main([
         "--replay", str(tmp_path / "missing.json"), "--fetched-at", "2025-01-04T00:00:00Z"
     ]) == 1

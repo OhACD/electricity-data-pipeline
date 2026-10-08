@@ -17,6 +17,21 @@ from oslo_energy.transformation.statnett_normalizer import StatnettNormalizer
 def compare_consumption(
     observations: pd.DataFrame, exported: pd.DataFrame, *, fetched_at: datetime
 ) -> pd.DataFrame:
+    """Compare hourly API and export consumption on complete Oslo dates.
+
+    Both frames require unique, hour-aligned UTC ``period_start_utc`` values
+    and finite nonnegative or missing ``consumption`` values. API observations
+    also require ``period_end_utc`` and one-hour ``period_hours`` values.
+
+    Return counts and completeness for dates present in the API. Daily totals
+    require all 23, 24 or 25 local hours to be paired, nonmissing and ended by
+    the aware ``fetched_at`` timestamp. Compute percent error as
+    100 * (API - export) / export, leaving it missing for zero export totals.
+    Values remain in provider units; neither source is treated as ground truth.
+
+    Raises:
+        ValueError: Timestamp, interval or consumption validation fails.
+    """
     if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
         raise ValueError("fetched_at must be timezone-aware")
     api = observations.set_index("period_start_utc")
@@ -64,6 +79,7 @@ def compare_consumption(
 
 
 def plot_comparison(comparison: pd.DataFrame, destination: Path) -> None:
+    """Save a yearly percent-gap chart using Matplotlib's noninteractive backend."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -102,6 +118,14 @@ def plot_comparison(comparison: pd.DataFrame, destination: Path) -> None:
 
 
 def main() -> None:
+    """Fetch annual API and CSV sources, archive them and write research outputs.
+
+    Parse command-line years and destinations, then write the comparison CSV,
+    chart and timestamped provenance JSON with source URLs, UTC fetch times,
+    checksums and discrepancy statistics. No unit conversion is applied.
+    Request, validation and filesystem errors propagate; earlier outputs may
+    remain if a later step fails.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--years", type=int, nargs="+", default=[2024, 2025, 2026])
     parser.add_argument("--output-dir", type=Path, default=Path("docs/research/statnett"))

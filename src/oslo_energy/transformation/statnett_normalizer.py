@@ -10,6 +10,13 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class StatnettQualityReport:
+    """Record coverage, missingness, partitions, and unresolved source validation.
+
+    Counts describe normalized observations; removed daily padding is reported
+    separately. Normalization does not establish units, finality, or training
+    readiness, which remains false by default.
+    """
+
     raw_slot_count: int
     expected_date_count: int
     observation_count: int
@@ -38,6 +45,8 @@ class StatnettQualityReport:
 
 @dataclass(frozen=True)
 class NormalizedStatnettData:
+    """Bundle all observations, fetch-time partitions, and their quality report."""
+
     observations: pd.DataFrame
     historical: pd.DataFrame
     incomplete: pd.DataFrame
@@ -46,6 +55,8 @@ class NormalizedStatnettData:
 
 
 class StatnettNormalizer:
+    """Map provider slots to UTC periods with Europe/Oslo calendar dates."""
+
     timezone = "Europe/Oslo"
     daily_period_ms = 86400000
     hourly_period_ms = 3600000
@@ -53,6 +64,17 @@ class StatnettNormalizer:
     def normalize(
         self, data: dict[str, Any], *, fetched_at: datetime
     ) -> NormalizedStatnettData:
+        """Validate and partition hourly or legacy daily provider measurements.
+
+        Endpoints are inclusive period starts. Hourly identity is the UTC start;
+        daily periods follow Oslo midnights and remove a required null padding
+        slot after each 25-hour autumn day. Genuine nulls and source indices
+        are preserved without modifying the payload or converting units.
+
+        The timezone-aware original fetch time determines completed, incomplete,
+        and future partitions. Invalid metadata or measurements raise ValueError;
+        valid output remains blocked from training.
+        """
         required = {
             "StartPointUTC", "EndPointUTC", "PeriodTickMs", "Production", "Consumption"
         }
@@ -122,6 +144,7 @@ class StatnettNormalizer:
     def _normalize_hourly(
         self, data: dict[str, Any], *, fetched_at: datetime
     ) -> NormalizedStatnettData:
+        """Map inclusive, hour-aligned UTC endpoints to one-hour source slots."""
         start = self._timestamp(data["StartPointUTC"], "StartPointUTC")
         end = self._timestamp(data["EndPointUTC"], "EndPointUTC")
         if end < start:
@@ -155,6 +178,13 @@ class StatnettNormalizer:
         self, observations: pd.DataFrame, *, fetched_at: datetime,
         raw_slot_count: int, padding_dates: tuple[str, ...], frequency: str,
     ) -> NormalizedStatnettData:
+        """Partition observations and summarize quality across all retained rows.
+
+        Hourly periods are historical when their end is at or before the fetch,
+        incomplete when the fetch lies within them, and future when their start
+        is later. Daily replay uses the Oslo fetch date instead. Missingness,
+        duplicate identities, and gaps do not certify source accuracy.
+        """
         fetch_time = pd.Timestamp(fetched_at).tz_convert(self.timezone)
         if frequency == "hourly":
             historical = observations.loc[observations["period_end_utc"] <= fetch_time].copy()
@@ -197,6 +227,7 @@ class StatnettNormalizer:
         return NormalizedStatnettData(observations, historical, incomplete, forecast, quality)
 
     def _local_midnight(self, value: Any, field: str) -> pd.Timestamp:
+        """Parse Unix milliseconds and require an Oslo local-midnight boundary."""
         timestamp = self._timestamp(value, field).tz_convert(self.timezone)
         if timestamp != timestamp.normalize():
             raise ValueError(f"{field} must identify Norwegian local midnight")
@@ -204,6 +235,7 @@ class StatnettNormalizer:
 
     @staticmethod
     def _timestamp(value: Any, field: str) -> pd.Timestamp:
+        """Parse finite integral Unix milliseconds into a UTC timestamp."""
         if (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
@@ -219,6 +251,7 @@ class StatnettNormalizer:
 
     @staticmethod
     def _measurements(values: Any, field: str) -> list:
+        """Validate and return an array of finite nonnegative numbers or nulls."""
         if not isinstance(values, list):
             raise ValueError(f"{field} must be an array")
         for value in values:
