@@ -1,22 +1,36 @@
 # Oslo Energy
 
-A research-oriented forecasting pipeline for Norwegian electricity consumption, built from Statnett’s public operational data. The project investigates data-product discrepancies, preserves raw measurement provenance, constructs leakage-safe temporal datasets, and evaluates statistical and machine-learning forecasting approaches.
+An open-source research project studying electricity consumption forecasting in Norway. We aim to understand how input features and training-data quality affect predictions, and how machine-learning models compare with statistical forecasting methods and simple baselines.
+
+The project currently provides the data pipeline for that research. It collects Statnett's public production and consumption data, preserves source snapshots, and prepares hourly observations for analysis. Despite the name, the active dataset covers **Norway as a whole**, not Oslo or the NO1 price area.
+
+## Research Goals
+
+- Measure how different feature sets change forecasts and prediction errors.
+- Study the effect of missing, noisy, or otherwise lower-quality training data.
+- Compare machine-learning models with statistical models and simple forecasting baselines under the same evaluation conditions.
+- Publish reproducible experiments, findings, and model performance, including results where simpler methods perform better.
+
+**Consumption forecasting is the first planned task.** Forecast horizons and model choices are not yet fixed. The [research plan](docs/research-plan.md) describes the proposed experiments and evaluation approach. No forecasting results have been published yet.
 
 ## Current Status
 
-Implemented: hourly API fetching, raw JSON archival, DST-safe normalization, quality reports, offline replay, discrepancy research and opt-in provenance-preserving PostgreSQL persistence.
+The data pipeline supports hourly API collection, raw JSON archives, normalization that handles daylight-saving time, quality reports, offline replay, and optional PostgreSQL storage with correction history.
 
 ```text
-Hourly API -> raw archive -> normalization -> candidate CSVs + quality report -> optional PostgreSQL persistence
+Statnett hourly API -> raw archive -> normalized CSVs + quality report
+                                              -> optional PostgreSQL storage
 ```
 
-Missing measurements remain missing. Completed, incomplete and future periods are separated using the original fetch time. Persistence writes completed hourly candidates and audits corrections; reports and database runs retain `training_ready: false`. Provider units, independent accuracy and training eligibility remain unresolved.
+We are **awaiting answers from Statnett** about differences between its API and exported data, measurement units, and how observations are revised. These questions matter for interpreting values and evaluating historical forecasts. See the [source investigation](docs/statnett-source-investigation.md) for the evidence.
 
-**Later:** analytical cleaning, features and models. Those stages are not implemented.
+Normalized data retains missing values and is marked `training_ready: false`: consistent structure and successful storage do not establish measurement accuracy or suitability for training. Analytical cleaning, feature engineering, and models are not implemented.
+
+**Next:** address the source questions, define the forecasting task, and move into feature engineering. We will then build baselines, statistical models, and machine-learning models, evaluate them, and publish the findings.
 
 ## Quickstart
 
-Use Python 3.10 or newer. From the repository root:
+Use **Python 3.10 or newer**. From the repository root:
 
 ```bash
 python -m venv .venv
@@ -30,71 +44,38 @@ Fetch, archive and normalize hourly data:
 python -m oslo_energy.pipeline.run_ingestion --from-date 2005-01-01 --normalize
 ```
 
-The start defaults to `2005-01-01`. Omit `--normalize` for fetch-and-archive only. Runtime files go to ignored `data/raw/statnett/` and `data/normalized/statnett/`. No database or Docker service is required.
+This command contacts Statnett, saves a JSON snapshot under `data/raw/statnett/`, and writes a new run directory under `data/normalized/statnett/`. The normalized outputs are:
 
-Replay an existing archive without a network request:
+- `historical_candidates.csv`: hours that ended by the original fetch time, including missing measurements.
+- `incomplete.csv`: hours that had started but not ended.
+- `future_quarantine.csv`: hours starting after the original fetch time.
+- `quality.json`: coverage, missing-value counts, and validation status.
 
-```bash
-python -m oslo_energy.pipeline.run_ingestion \
-  --replay path/to/raw.json \
-  --fetched-at 2026-10-06T00:56:03.832107Z \
-  --output-dir data/normalized/statnett
-```
+The command prints the archive and output locations. The start date defaults to `2005-01-01`; omit `--normalize` to fetch and archive only. Generated data is ignored by Git. **Docker and PostgreSQL are not required for this workflow.**
 
-Use the original archive path and timezone-aware fetch timestamp, not replay time. The filename records its UTC fetch time. Replay supports hourly and legacy daily snapshots. Run `python -m oslo_energy.pipeline.run_ingestion --help` for all options and see the [system reference](docs/oslo_energy_data_normalization_cleaning_pipeline.md) for output contracts.
-
-## Optional Persistence
-
-PostgreSQL writes are opt-in. Start the local service, apply the additive migration once, then enable persistence on a normalized live run:
-
-```bash
-docker compose up -d postgres
-python -m oslo_energy.database.migrate
-python -m oslo_energy.pipeline.run_ingestion --normalize --persist
-```
-
-Replay can also use `--persist`; it retains the supplied original `--fetched-at` cutoff. A failed database write returns nonzero but keeps the raw archive and normalized files. Persistence does not certify values for training. See the [persistence design](docs/database-design.md) for timestamp ordering, revisions and database test instructions.
-
-## Source Choice and Findings
-
-We already used the API; the investigation prompted a switch from **daily API ingestion to hourly API ingestion**, not from CSV to API.
-
-| Comparison for the same Norwegian day | Finding |
-| --- | --- |
-| Daily API ingestion vs summed hourly API values | Exact agreement on audited dates |
-| Daily API ingestion vs summed hourly CSV exports | Consumption and production differences |
-
-Hourly API observations are our **canonical source of truth** for future aggregates, features and training datasets. They expose missing hours and make aggregation auditable. This is an architectural choice, not proof that the API is independently correct. CSV exports remain comparison evidence, not interchangeable training inputs.
-
-![Daily API ingestion consumption compared with hourly CSV consumption summed by Norwegian date; daily API totals are reproduced from verified hourly API sums](docs/research/statnett/consumption_discrepancy.png)
-
-The chart compares daily ingestion with summed hourly exports on 999 complete local days. Its daily API side is reconstructed from hourly API sums and verified against the original daily archive. The [research document](docs/statnett_hourly_source_decision.md) owns the detailed evidence, coverage rules and unresolved causes, including the suspected export scaling problem.
-
-Reproduce the research with optional plotting dependencies:
-
-```bash
-python -m pip install -e '.[dev,research]'
-python -m oslo_energy.pipeline.compare_consumption
-```
+See the [pipeline guide](docs/pipeline.md) for replay, options, and troubleshooting, or the [PostgreSQL guide](docs/persistence.md) for optional storage.
 
 ## Documentation
 
-| Document | Purpose |
+| Guide | Read it to... |
 | --- | --- |
-| [System and Pipeline](docs/oslo_energy_data_normalization_cleaning_pipeline.md) | Implemented components, contracts, outputs, replay and failure behavior |
-| [Source Decision and Research](docs/statnett_hourly_source_decision.md) | Findings, visualization, source-selection rationale and open provider questions |
-| [Persistence Design](docs/database-design.md) | Implemented schema, migration, integrity, revisions and opt-in commands |
+| [Research Plan](docs/research-plan.md) | Understand the questions, planned experiments, and publication goals |
+| [Pipeline](docs/pipeline.md) | Collect data, inspect outputs, replay snapshots, and understand normalization |
+| [PostgreSQL Storage](docs/persistence.md) | Configure optional storage and understand correction history |
+| [Statnett Investigation](docs/statnett-source-investigation.md) | Review the source discrepancies, evidence, and open questions |
 
-Runtime code lives under [src/oslo_energy](src/oslo_energy/); tests under [tests](tests/). Keep system contracts in the system reference, new measurements in the research document and storage details in the persistence design.
+Implementation lives under [src/oslo_energy](src/oslo_energy/), with tests under [tests](tests/).
 
-## Testing
+## Development and Contributions
 
 ```bash
 python -m pytest
 python -m compileall -q src/oslo_energy
 ```
 
-The ordinary tests use mocked HTTP, temporary directories and saved examples; real network access and PostgreSQL are not required. Explicit PostgreSQL integration tests are documented in the [persistence design](docs/database-design.md).
+The default test suite runs without API access or PostgreSQL. Database integration tests are opt-in; see the [PostgreSQL guide](docs/persistence.md).
+
+Contributions are welcome, especially source-validation evidence, reproducible data-quality analyses, tests, and documentation improvements. For features or models, discuss the forecasting task and evaluation design in an issue before building a new experiment. See the [research plan](docs/research-plan.md) for the current direction.
 
 ## License and Sources
 
